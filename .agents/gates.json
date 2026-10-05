@@ -1,0 +1,5 @@
+{
+  "fast": "echo 'fast gate not configured yet: set it in .agents/gates.json once the stack is chosen' >&2; exit 1",
+  "full": "echo 'full gate not configured yet: set it in .agents/gates.json once the stack is chosen' >&2; exit 1",
+  "externalReview": null
+}
