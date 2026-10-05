@@ -1,5 +1,5 @@
 {
   "fast": "pnpm lint && pnpm typecheck && pnpm test",
-  "full": "pnpm lint && pnpm typecheck && pnpm test && TEST_DATABASE_URL=postgresql://app:app@127.0.0.1:5434/postgres pnpm test:integration && pnpm build && pnpm build:vercel && pnpm test:e2e && pnpm audit --prod --audit-level high",
+  "full": "pnpm lint && pnpm typecheck && pnpm test && TEST_DATABASE_URL=postgresql://app:app@127.0.0.1:5434/postgres pnpm test:integration && pnpm build && pnpm build:vercel && TEST_DATABASE_URL=postgresql://app:app@127.0.0.1:5434/postgres pnpm test:e2e && pnpm lighthouse && pnpm audit --prod --audit-level high",
   "externalReview": null
 }

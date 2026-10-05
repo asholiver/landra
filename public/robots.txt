@@ -1,0 +1,4 @@
+# Crawling is deliberately allowed so crawlers can see the noindex directive (X-Robots-Tag and
+# the robots meta tag). Blocking crawling here would stop them seeing it. See ADR-0004.
+User-agent: *
+Allow: /

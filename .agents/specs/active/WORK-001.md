@@ -228,7 +228,7 @@ Tasks run one at a time in this checkout on `work/WORK-001-f0-foundation` (no `w
 | T1 Toolchain scaffold and proposed gates | ai-engineering:platform | — | `package.json`, lockfile, `.nvmrc`, `.npmrc`, `tsconfig*.json`, `biome.json`, `vite.config.ts`, `react-router.config.ts` (preset only when building for Vercel), `vitest.config.ts`, `playwright.config.ts`, `docker-compose.yml`, `.env.example`, `.gitignore`, a minimal `app/` (root and a route) so the build works, README setup section; **proposes** `fast`/`full` in `.agents/gates.json` (working tree only) | A2, A3, R1, AC1, part of AC2 | done (uncommitted) |
 | ⛔ Gate checkpoint | Owner | T1 | Owner reviews the proposed gate commands; they're committed only after approval | — | done (approved by Ashley Oliver, 2026-10-05) |
 | T2 Server foundation: config, database, auth, allowlist | ai-engineering:backend | checkpoint | `src/server/**`, `src/shared/**`, `drizzle/**`, `drizzle.config.ts`, `scripts/allowlist.ts`, auth resource route `app/routes/api.auth.$.ts`, `app/routes/healthz.ts`, session-guard helper, unit and integration tests | R3–R7, R11–R13, BR1–BR3, AC8, AC11, part of AC13 | done: targeted security review plus re-review; all BLOCKER/HIGH fixed; M-1, M-2, M-3, M-A and L-A to L-E fixed; L-2 deferred to F5 |
-| T3 Public and app UI, headers, noindex, accessibility and performance | ai-engineering:frontend | T2 | `app/**` (except T2's routes), `app/entry.server.tsx` (security headers, nonce CSP, X-Robots-Tag, X-Request-Id), `src/shared/product.ts` (working label), `public/robots.txt`, E2E + axe tests, Lighthouse CI config | R2, R8–R10, AC6 (locally), AC12, AC14 | pending |
+| T3 Public and app UI, headers, noindex, accessibility and performance | ai-engineering:frontend | T2 | `app/**` (except T2's routes), `app/entry.server.tsx` (security headers, nonce CSP, X-Robots-Tag, X-Request-Id), `src/shared/product.ts` (working label), `public/robots.txt`, E2E + axe tests, Lighthouse CI config | R2, R8–R10, AC6 (locally), AC12, AC14 | done. Targeted security review: no BLOCKER/HIGH; 1 MEDIUM and 5 LOW reported to the owner |
 | T4 CI workflows and Node-build smoke | ai-engineering:platform | T3 | `.github/workflows/**`, `.github/dependabot.yml`, `vercel.json`, Node-build smoke script, secret-scan config | R14–R18 (workflow files only), AC10, AC13; jobs needing secrets report SKIPPED until Stage 2 | pending |
 | Prove | coordinator + qa + security-reviewer | T4 | full gate, QA against the spec, security review (auth, secrets, headers, CI) | — | pending |
 
@@ -353,6 +353,47 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
       - The working-tree `full` command in a clean environment exited 0: 165 unit and 35 integration tests passed, plus both builds, E2E, and the audit at HIGH (the 1 moderate advisory is accepted).
       - Known side effect of L-A: values after keys containing token/secret/password followed by `:` or `=` are redacted (e.g. `tokens: 3`). Accepted as safe over-redaction. The working name must not appear as the user-facing product name.
   - The HIGH-4 test imports a non-public better-auth module path, so it may break on upgrade.
+- **T3 results** (2026-10-05, Node 24):
+  - Coordinator `run-gate.sh fast` → PASSED.
+  - The proposed full command in a clean environment exited 0: 197 unit, 42 integration and 36 E2E tests passed (axe included); Lighthouse assertions passed for `/` and `/sign-in` (Performance, Accessibility and Best Practices all 1.00; SEO excluded because of noindex); audit at HIGH passed.
+  - **Header/CSP design:** the pre-rendered `/` and `/sign-in` ship no inline scripts (hydration opted out; `/sign-in` uses one external `/sign-in.js`), so `script-src 'self'` works without a nonce or hash. Dynamic responses get a per-request nonce, `X-Request-Id`, the headers and a request log from root middleware. All headers are defined once, in `src/server/http/security-headers.ts`.
+  - **Serving paths:**
+    - Node: a custom Express server (`server/node-server.ts`, run from TypeScript source by Node 24) applies the same headers to static files.
+    - Vercel: `vercel.json` headers cover exactly the statically served paths, enforced by a test. **Unverified until Stage 2.**
+  - **Open items:**
+    - Pre-rendered `/sign-in` can't know at build time whether Google is configured; the "not configured" message appears after the button is pressed. Without JavaScript there's no error message and no already-signed-in redirect.
+    - T3 changed `app/lib/require-user.server.ts` (T2) to return 503 on database or config failure.
+    - `@react-router/serve` is no longer used by `start`.
+    - HSTS is set without `includeSubDomains`/`preload`.
+  - **Owner decisions on T3** (Ashley Oliver, 2026-10-05):
+    - **Approved gate change:** `full` adds `TEST_DATABASE_URL=postgresql://app:app@127.0.0.1:5434/postgres` to `pnpm test:e2e` and adds `pnpm lighthouse`.
+    - **A targeted security review runs before the T3 commit.** BLOCKER/HIGH findings are fixed with regression tests; MEDIUM/LOW findings are reported.
+    - **Accepted trade-offs:**
+      - the pre-rendered `/sign-in` progressive-enhancement limits for F0;
+      - conservative HSTS until an owned domain exists;
+      - running Node 24 TypeScript via type stripping, provided automated startup/build checks protect its constraints (T4's Node-build smoke test must run `pnpm start`);
+      - removing `@react-router/serve` in T4.
+  - **Targeted T3 security review** (2026-10-05): **no BLOCKER/HIGH.** Verified:
+    - headers on about 30 URL forms on the Node server;
+    - nonce generation and propagation;
+    - the Origin checks (missing, `null`, foreign, `.data` and GET variants);
+    - no effect from a spoofed Host (`trust proxy` off);
+    - DOM-safe `sign-in.js`;
+    - `/app` fails closed with 503;
+    - static-serving restrictions;
+    - E2E disposable-DB safeguards intact.
+
+    Findings for owner decision:
+    - **T3-M1 (MEDIUM):** `POST /sign-in/google` calls `auth.api.signInSocial` directly, bypassing Better Auth's rate limiter. Each call inserts a `verification` row, and `formData()` has no body-size cap on the Node server.
+    - **T3-L1:** on Vercel, `/index.html`, `/sign-in/index.html` and `/sign-in/` may be served without the headers (unverified; Stage 2 check).
+    - **T3-L2:** CSP `form-action` may block the proxied sign-in redirect chain on previews (preview → Google → production → preview). Stage 2 check.
+    - **T3-L3:** stack traces in `.data` responses when `NODE_ENV` isn't `production`, including an empty string.
+    - **T3-L4:** the E2E health check could accept an already-running server on port 4173.
+    - **T3-L5:** no `Cache-Control: private, no-store` on authenticated `/app` HTML.
+    - INFO: `/sign-out` returns 500 rather than 503 on invalid config (still fails closed).
+  - **Gates before commit:**
+    - Coordinator `run-gate.sh fast` → PASSED.
+    - The working-tree approved `full` in a clean environment exited 0: 197 unit, 42 integration and 36 E2E tests, Lighthouse assertions passed, audit at HIGH passed.
 - **Local Postgres prerequisite:** integration tests must fail fast with a clear, actionable message (e.g. "PostgreSQL is not reachable at <host:port>; run `docker compose up -d`") when the database is unavailable, instead of an obscure test failure. Keep it a lightweight pre-check, not new orchestration (assigned to T2).
 ## Review state
 <!-- maintained by /ai-engineering:review: gates, security, QA, EXTERNAL REVIEW status -->
