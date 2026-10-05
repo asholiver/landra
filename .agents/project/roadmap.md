@@ -33,7 +33,7 @@ Success: the owner can use the product from any device at a free public URL to t
 ## Phase 1.5: Before inviting anyone else
 | ID | Feature | Summary | Status |
 |---|---|---|---|
-| F5 | Invites, privacy and email sign-in | Approve access requests into the allowlist; email sign-in (one-time code preferred over a link; needs an owned domain and an email provider); account linking by verified email; data export (JSON); account deletion; per-user abuse limits; processor list | idea |
+| F5 | Invites, privacy and email sign-in | Approve access requests into the allowlist; email sign-in (one-time code preferred over a link; needs an owned domain and an email provider); account linking by verified email; data export (JSON); account deletion; per-user abuse limits, including **rate limiting backed by a shared store** (F0's Better Auth rate limit is in-memory per serverless instance; WORK-001 L-2); processor list | idea |
 
 ## Phase 2: AI copilot
 | ID | Feature | Summary | Status |

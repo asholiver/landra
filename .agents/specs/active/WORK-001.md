@@ -44,7 +44,14 @@ Excluded (later features):
 - R11 Structured JSON server logs to stdout (request id, route, status, duration). Never logs tokens, cookies, secrets or full email addresses.
 - R12 Configuration is validated at startup with zod. Missing or invalid env vars fail fast with a clear message that names the variable but not its value.
 - R13 Allowlist script: `pnpm allowlist add|remove|list <email>` against the database in `DATABASE_URL`. Emails are normalised (trimmed, lower-cased).
-- R14 CI on every PR from this repository: `full` gate, Node-build smoke test, Neon branch created, migrations applied to it, preview deployed with that branch's `DATABASE_URL`, and the preview URL reported on the PR. The Neon branch is deleted when the PR closes.
+- R14 CI on every PR from this repository:
+  1. The `full` gate and the Node-build smoke test run.
+  2. A branch is created in the **separate preview Neon project** (never production; ADR-0003 as amended), and migrations are applied to it.
+  3. A preview is deployed with only that branch's URLs and preview-only secrets.
+  4. The preview URL is reported on the PR.
+  5. The branch is deleted when the PR closes.
+
+  PR workflows never have access to production secrets: those live only in the GitHub `production` environment.
 - R15 CI on `main`:
   1. The `full` gate runs.
   2. A production job bound to the GitHub `production` environment waits for the owner's explicit manual approval. Without that approval nothing touches production.
@@ -197,11 +204,12 @@ Implementation happens locally first. External services are needed only at the s
 - **Stage 1: push and CI (owner approval required).** Pushing the work branch publishes code to the public repository, so it needs the owner's go-ahead. CI runs the `full` gate on the PR with no secrets. Hosting jobs report `SKIPPED: not configured` (never "passed") while Stage 2 secrets are absent.
 - **Stage 2: preview environments.** The owner creates:
   - a Vercel project (Git auto-build disabled, Node version per A3, function region `lhr1`) and a project-scoped token;
-  - a Neon project in `aws-eu-west-2` and an API key;
+  - a separate **preview** Neon project in `aws-eu-west-2` (Postgres 14 or later; migrations use `CREATE OR REPLACE TRIGGER`), with no production data, and a Neon API key restricted to that project if project-scoped keys are available on the plan (otherwise delivery stops for an owner decision);
+  - a preview-only `BETTER_AUTH_SECRET`, distinct from production's;
   - a Google OAuth client;
-  - an OAuth proxy secret.
+  - an OAuth proxy secret (distinct from both auth secrets).
 
-  Secrets go into GitHub only. Delivery gives exact step-by-step instructions at this point. Covers AC4.
+  Preview secrets go into GitHub repository/PR-accessible secrets. Production secrets go only into the `production` environment (Stage 3). Delivery gives exact step-by-step instructions at this point. Covers AC4.
 - **Stage 3: production.** The owner:
   - creates the GitHub `production` environment with themselves as required reviewer;
   - adds the production secrets;
@@ -219,7 +227,7 @@ Tasks run one at a time in this checkout on `work/WORK-001-f0-foundation` (no `w
 |---|---|---|---|---|---|
 | T1 Toolchain scaffold and proposed gates | ai-engineering:platform | — | `package.json`, lockfile, `.nvmrc`, `.npmrc`, `tsconfig*.json`, `biome.json`, `vite.config.ts`, `react-router.config.ts` (preset only when building for Vercel), `vitest.config.ts`, `playwright.config.ts`, `docker-compose.yml`, `.env.example`, `.gitignore`, a minimal `app/` (root and a route) so the build works, README setup section; **proposes** `fast`/`full` in `.agents/gates.json` (working tree only) | A2, A3, R1, AC1, part of AC2 | done (uncommitted) |
 | ⛔ Gate checkpoint | Owner | T1 | Owner reviews the proposed gate commands; they're committed only after approval | — | done (approved by Ashley Oliver, 2026-10-05) |
-| T2 Server foundation: config, database, auth, allowlist | ai-engineering:backend | checkpoint | `src/server/**`, `src/shared/**`, `drizzle/**`, `drizzle.config.ts`, `scripts/allowlist.ts`, auth resource route `app/routes/api.auth.$.ts`, `app/routes/healthz.ts`, session-guard helper, unit and integration tests | R3–R7, R11–R13, BR1–BR3, AC8, AC11, part of AC13 | pending |
+| T2 Server foundation: config, database, auth, allowlist | ai-engineering:backend | checkpoint | `src/server/**`, `src/shared/**`, `drizzle/**`, `drizzle.config.ts`, `scripts/allowlist.ts`, auth resource route `app/routes/api.auth.$.ts`, `app/routes/healthz.ts`, session-guard helper, unit and integration tests | R3–R7, R11–R13, BR1–BR3, AC8, AC11, part of AC13 | done: targeted security review plus re-review; all BLOCKER/HIGH fixed; M-1, M-2, M-3, M-A and L-A to L-E fixed; L-2 deferred to F5 |
 | T3 Public and app UI, headers, noindex, accessibility and performance | ai-engineering:frontend | T2 | `app/**` (except T2's routes), `app/entry.server.tsx` (security headers, nonce CSP, X-Robots-Tag, X-Request-Id), `src/shared/product.ts` (working label), `public/robots.txt`, E2E + axe tests, Lighthouse CI config | R2, R8–R10, AC6 (locally), AC12, AC14 | pending |
 | T4 CI workflows and Node-build smoke | ai-engineering:platform | T3 | `.github/workflows/**`, `.github/dependabot.yml`, `vercel.json`, Node-build smoke script, secret-scan config | R14–R18 (workflow files only), AC10, AC13; jobs needing secrets report SKIPPED until Stage 2 | pending |
 | Prove | coordinator + qa + security-reviewer | T4 | full gate, QA against the spec, security review (auth, secrets, headers, CI) | — | pending |
@@ -247,6 +255,104 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
   - Every later addition to a gate (axe, Lighthouse, Node-build startup check, secret scan) is an explicit `gates.json` change that review flags and the owner approves. It's never hidden behind a package script.
   - Known residual gap: individual commands still resolve through `package.json`. Recorded as a candidate improvement for the AI Engineering System, not redesigned here.
 - **Node:** the owner's machine-wide nvm default stays unchanged. Coordinator and agents activate the repository's pinned Node (`nvm use`, reading `.nvmrc`) within their own shell before running pnpm or gates. No global environment changes.
+- **Integration-test database isolation** (approved by Ashley Oliver, 2026-10-05, subject to security review of the implementation). This approves only this narrowly defined mechanism; it is not blanket approval for SQL DROP.
+  - Requirements:
+    - A disposable test server (`postgres-test` Compose service), separate from the dev database. It listens only on `127.0.0.1:5434`, stores data in tmpfs, and is started with `-c app.disposable_test_server=on`.
+    - Tests require an explicit `TEST_DATABASE_URL`. They never fall back to a default or to `DATABASE_URL`/`DATABASE_URL_UNPOOLED`.
+    - Before any DDL, all of these must hold, or the run aborts having issued no SQL other than reading the marker:
+      - the host is loopback (`127.0.0.1`, `localhost`, `::1`) and the port is exactly 5434;
+      - the URL is not equal to the application URLs (normalised);
+      - the host is not a Neon host;
+      - `NODE_ENV` is not `production`;
+      - `VERCEL` is unset;
+      - `SHOW app.disposable_test_server` returns `on`.
+    - Each run creates its own database `it_<12 random [a-z0-9]>`, validated against `^it_[a-z0-9]{12}$`.
+    - Cleanup drops only that run's internally generated name, held in memory. The name is never taken from env, arguments or files. All safeguards are re-checked immediately before cleanup.
+    - Failure to clean up is safe, because the server is disposable.
+    - Every refusal path has a negative automated test.
+    - The destructive code gets explicit security review.
+  - The previous design (default URL on the dev server at 5433, name-suffix check only, `DROP … WITH (FORCE)`) was denied and is replaced.
+- T2 results (2026-10-05, Node 24.21.0):
+  - Unit: 10 files, 106 tests. Integration: 3 files, 11 tests, against the disposable server.
+  - Both builds pass.
+  - Coordinator `run-gate.sh fast` → `GATE fast: PASSED (exit 0)`.
+  - Demonstrated:
+    - the run database is removed after the run;
+    - pointing at dev port 5433 aborts before any SQL;
+    - unset `TEST_DATABASE_URL` aborts;
+    - a stopped `postgres-test` gives the actionable message.
+  - **O1 decided:** `pg` (node-postgres) via drizzle `node-postgres` against Neon's pooled URL, with the same code path locally.
+    - Bounded pool (max 5, 15s connect, 15s statement timeout) and an idle-error handler.
+    - Migrations use the unpooled URL.
+  - Owner decisions on T2 (Ashley Oliver, 2026-10-05):
+    - **Keep the session-creation allowlist hook.** A de-listed user can't start a new session. What happens to already-active sessions must be documented exactly, with no claim of full revocation unless that is implemented and tested.
+    - **Accept the optional `OAUTH_PROXY_PRODUCTION_URL`** as configuration only, with no Vercel-specific assumptions in application/domain logic.
+    - **Approved gate change:** `full` sets `TEST_DATABASE_URL=postgresql://app:app@127.0.0.1:5434/postgres` explicitly.
+      - Throwaway, non-secret credentials for the disposable local/CI test server only.
+      - No dependence on ambient `DATABASE_URL`, `.env` or shell configuration.
+    - **A targeted security review of T2 runs before T2 is committed.** BLOCKER/HIGH findings are fixed and retested before the commit; MEDIUM/LOW findings are reported to the owner. This doesn't replace the final WORK-001 review cycle.
+- **Targeted T2 security review** (2026-10-05, ai-engineering:security-reviewer): 0 BLOCKER, 4 HIGH, 3 MEDIUM, 4 LOW. Verdict: not ready to commit until the HIGH findings are fixed.
+  - HIGH:
+    - HIGH-1: query parameters in `TEST_DATABASE_URL` (`host=`, `port=`) override the checked host and port in `pg`.
+    - HIGH-2: the disposable-server marker can be spoofed through the `options=` connection parameter or an ambient `PGOPTIONS`.
+    - HIGH-3: `sanitiseReturnPath` returns `//evil.example` for dot-segment inputs (an open redirect, AC8).
+    - HIGH-4: the OAuth Proxy completion endpoints on production let anyone holding the proxy secret mint a session for any allowlisted email.
+    - Status: all four sent back to T2 for fixes with regression tests.
+  - MEDIUM:
+    - M-1: active sessions survive removal from the allowlist (sliding 7-day refresh updates the row; the hook doesn't fire). Being documented and tested as current behaviour; revocation is an owner decision.
+    - M-2: Better Auth's internal logs bypass the redacting logger, and drizzle errors include query parameters.
+    - M-3: cookie security, localhost trusted origins and rate limiting depend only on `NODE_ENV`.
+    - M-2 and M-3 are awaiting owner decisions.
+  - LOW:
+    - L-1: the TCP pre-check runs before the safety checks, and the `[::1]` probe fails. Being fixed now, because it's inside the approved test-DB mechanism.
+    - L-2: in-memory rate limiting is per serverless instance.
+    - L-3: `OAUTH_PROXY_SECRET` could equal `BETTER_AUTH_SECRET`.
+    - L-4: a cleanup error after a migration failure is swallowed. Being fixed with L-1.
+    - L-2 and L-3 are awaiting owner decisions.
+- **HIGH remediation** (2026-10-05): HIGH-1 to HIGH-4 are fixed, along with L-1, L-4 and the M-1 documentation. Each has a regression test.
+  - Coordinator `run-gate.sh fast` → `GATE fast: PASSED (exit 0)`.
+  - The working-tree `full` command, run in an environment without `.env`, `DATABASE_URL`, `PGOPTIONS` or `TEST_DATABASE_URL`, exited 0:
+    - unit: 10 files, 121 tests;
+    - integration: 5 files, 16 tests;
+    - both builds passed; 1 E2E test passed;
+    - `pnpm audit --prod --audit-level high` passed.
+  - The audit also reports 1 **moderate** advisory below the threshold: esbuild ≤0.24.2, GHSA-67mh-4wv8-2f99. It affects esbuild's dev server only, via `better-auth > drizzle-kit > @esbuild-kit/esm-loader`, and is reported to the owner.
+  - Residual from the HIGH-4 fix: a leaked proxy secret still works against previews. Resolved by owner decision 6 below: previews hold no production data.
+- **Owner decisions after the review** (Ashley Oliver, 2026-10-05, binding for T2):
+  1. **M-1:** `pnpm allowlist remove` revokes the user's existing sessions atomically, as well as removing the email (real revocation), with tests for no new session, existing session invalidated, other users unaffected, and atomicity. The owner wrote `allowed-email`; the coordinator kept the existing `allowlist` command name (R13) unless the owner asks for a rename.
+  2. **M-2:** Better Auth logging goes through the redacting logger.
+  3. **M-3:** reject an https `BETTER_AUTH_URL` without `NODE_ENV=production`; require https in production. Tests for accepted and rejected combinations.
+  4. **L-2:** deferred to F5. Rate limiting is in-memory per serverless instance, which is weak on Vercel. F5 owns a shared-store treatment before inviting other users. Documented in code and on the roadmap.
+  5. **L-3:** the proxy secret must differ from the auth secret; minimum 32 characters; weak secrets rejected in production. Negative tests.
+  6. **Preview data isolated from production:** see R14, Stage 2 and the ADR-0003 amendment.
+  7. **Accepted dependency risk (temporary):**
+     - Advisory: GHSA-67mh-4wv8-2f99 (moderate), esbuild ≤0.24.2.
+     - Path: `better-auth > drizzle-kit > @esbuild-kit/esm-loader > @esbuild-kit/core-utils > esbuild`.
+     - Why exposure is low: the advisory concerns esbuild's development server, which the production app never starts. esbuild is only reachable through drizzle-kit's loader, which isn't used at runtime.
+     - The production audit gate still fails at HIGH or above; nothing is suppressed.
+     - Reassess on any Better Auth, drizzle-kit or dependency upgrade, and before F5.
+  8. **Round 3 (owner decisions 1–5) results:**
+     - Coordinator `run-gate.sh fast` → PASSED.
+     - The working-tree `full` command in a clean environment exited 0: 137 unit and 28 integration tests passed.
+  9. **Focused security re-review of rounds 2–3** (2026-10-05): HIGH-1 to HIGH-4, M-1, M-2, M-3 and L-3 are verified fixed. New findings: 1 HIGH, 1 MEDIUM, 5 LOW.
+     - **NEW-H1 (HIGH):** a NUL byte (`%00`) in the user or database part of `TEST_DATABASE_URL` injects a startup parameter that spoofs the disposable-server marker. Being fixed now.
+     - **L-C (LOW):** the revocation transaction must be pinned to READ COMMITTED, with a deterministic race test. Being fixed now, under owner decision 1 (atomicity).
+     - **L-D (LOW):** the trigger function needs a pinned `search_path`, schema-qualified tables, and coverage of `UPDATE OF user_id`. Being fixed now, under owner decision 1.
+     - **M-A (MEDIUM):** the token redactor also removes request ids, git SHAs, routes and URL paths, which conflicts with R11. Owner decision.
+     - **L-A (LOW):** short cookie and token values in free text, and connection-string passwords, are not redacted. Owner decision.
+     - **L-B (LOW):** the proxy production guard fails open if production is served from two different origins. Owner decision.
+     - **L-E (LOW):** an encoded `//` can survive dot-segment normalisation in return paths. Safe for browsers; a later decode-and-redirect would be unsafe. Owner decision.
+  10. **Round 4 results:** NEW-H1, L-C and L-D fixed with regression tests.
+      - Coordinator `run-gate.sh fast` → PASSED.
+      - The working-tree `full` command in a clean environment exited 0: 149 unit and 32 integration tests passed.
+      - Migration 0002 uses `CREATE OR REPLACE TRIGGER`, so the Neon projects must run Postgres 14 or later (added to the Stage 2 instructions).
+  11. **Owner decision (Ashley Oliver, 2026-10-05):** fix M-A, L-A, L-B and L-E in T2 as recommended (round 5).
+  12. The `landra_integration_tests` test-only connection identifier is acceptable.
+  13. **Round 5 results:** M-A, L-A, L-B and L-E fixed with regression tests.
+      - Coordinator `run-gate.sh fast` → PASSED.
+      - The working-tree `full` command in a clean environment exited 0: 165 unit and 35 integration tests passed, plus both builds, E2E, and the audit at HIGH (the 1 moderate advisory is accepted).
+      - Known side effect of L-A: values after keys containing token/secret/password followed by `:` or `=` are redacted (e.g. `tokens: 3`). Accepted as safe over-redaction. The working name must not appear as the user-facing product name.
+  - The HIGH-4 test imports a non-public better-auth module path, so it may break on upgrade.
 - **Local Postgres prerequisite:** integration tests must fail fast with a clear, actionable message (e.g. "PostgreSQL is not reachable at <host:port>; run `docker compose up -d`") when the database is unavailable, instead of an obscure test failure. Keep it a lightweight pre-check, not new orchestration (assigned to T2).
 ## Review state
 <!-- maintained by /ai-engineering:review: gates, security, QA, EXTERNAL REVIEW status -->

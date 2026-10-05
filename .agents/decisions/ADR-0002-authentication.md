@@ -16,6 +16,11 @@ Facts verified 2026-10-05:
 - Library: Better Auth. Users, sessions and accounts are stored in our Postgres via the Drizzle adapter (ADR-0003).
 - F0: Google OAuth is the only sign-in method. Scopes: `openid email profile`.
 - Account creation is gated by a server-side allowlist of email addresses. A user-creation hook rejects any email not on the list. Allowlist entries are managed by an owner-run script; personal emails are never committed to the repository.
+- Removing an email from the allowlist (amended 2026-10-05, owner decision after the T2 security review):
+  - The email is removed and all of that user's existing sessions are revoked in one atomic operation.
+  - New sessions are refused both by the Better Auth hook and at database level.
+  - The session cookie cache is disabled, so revocation takes effect on the next request.
+- On the production deployment, the OAuth Proxy's completion endpoints are refused (HIGH-4). Only preview deployments complete proxied sign-ins.
 - Preview deployments sign in through the OAuth Proxy plugin. The proxy secret is a deployment secret: it's never exposed to fork PRs and never committed.
 - F5 (Invites, privacy and email sign-in) adds email sign-in, preferring a one-time code over a clickable link because email scanners pre-open links. A domain is bought at that point for sending. Accounts link by verified email.
 - Not planned: GitHub sign-in (developer-centric), passwords, Apple (needs a paid developer account). Passkeys are parked until email sign-in exists as a recovery path.
