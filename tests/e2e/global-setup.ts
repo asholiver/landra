@@ -1,4 +1,5 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createWriteStream, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -12,10 +13,13 @@ import {
 import { assertPostgresReachable } from "../support/postgres-precheck";
 import {
   E2E_BASE_URL,
+  E2E_PORT,
   e2eServerEnvironment,
   RUN_DATABASE_ENV,
+  RUN_VERSION_ENV,
   SERVER_LOG_ENV,
 } from "./support/e2e-environment";
+import { assertPortFree, waitUntilOwnServerReady } from "./support/readiness";
 
 const root = resolve(import.meta.dirname, "../..");
 const STARTUP_TIMEOUT_MS = 30_000;
@@ -30,21 +34,6 @@ function buildNodeServer() {
   // A VERCEL variable would switch the build to the Vercel preset, which has no Node server.
   delete environment.VERCEL;
   execFileSync("pnpm", ["build"], { cwd: root, env: environment, stdio: "inherit" });
-}
-
-async function waitUntilHealthy(server: ChildProcess) {
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (server.exitCode !== null) throw new Error("The E2E web server exited during startup.");
-    try {
-      const response = await fetch(`${E2E_BASE_URL}/healthz`);
-      if (response.ok) return;
-    } catch {
-      // Not listening yet.
-    }
-    await new Promise((done) => setTimeout(done, 200));
-  }
-  throw new Error("The E2E web server did not become healthy in time.");
 }
 
 async function stopServer(server: ChildProcess) {
@@ -63,8 +52,10 @@ async function stopServer(server: ChildProcess) {
 export default async function globalSetup() {
   const { host, port } = assertDisposableTarget(testDatabaseUrl(), process.env);
   await assertPostgresReachable(host, port);
+  await assertPortFree(E2E_PORT);
 
   buildNodeServer();
+  const runVersion = `e2e-${randomUUID()}`;
 
   const runUrl = await createRunDatabase();
   let server: ChildProcess | undefined;
@@ -85,13 +76,20 @@ export default async function globalSetup() {
     // Explicit environment only: nothing ambient (no .env, no DATABASE_URL) reaches the server.
     server = spawn(process.execPath, ["server/node-server.ts"], {
       cwd: root,
-      env: e2eServerEnvironment(runUrl),
+      env: e2eServerEnvironment(runUrl, runVersion),
       stdio: ["ignore", "pipe", "pipe"],
     });
     server.stdout?.pipe(log);
     server.stderr?.pipe(log);
-    await waitUntilHealthy(server);
+    const child = server;
+    await waitUntilOwnServerReady({
+      baseUrl: E2E_BASE_URL,
+      expectedVersion: runVersion,
+      hasExited: () => child.exitCode !== null,
+      timeoutMs: STARTUP_TIMEOUT_MS,
+    });
 
+    process.env[RUN_VERSION_ENV] = runVersion;
     process.env[RUN_DATABASE_ENV] = runUrl;
     process.env[SERVER_LOG_ENV] = logFile;
   } catch (error) {

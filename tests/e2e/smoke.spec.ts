@@ -113,21 +113,33 @@ test.describe("sign-in page behaviour", () => {
   });
 
   test("shows the loading state while the sign-in request is in flight", async ({ page }) => {
+    // Running page.evaluate (or a locator query) while a navigation is pending is unreliable, so
+    // the page reports its own state, through an exposed binding, at the moment of submission.
+    let stateAtSubmit: unknown;
+    await page.exposeFunction("reportSignInState", (state: unknown) => {
+      stateAtSubmit = state;
+    });
+    await page.addInitScript(() => {
+      document.addEventListener("submit", () => {
+        const button = document.querySelector("[data-sign-in-button]") as HTMLButtonElement | null;
+        const status = document.querySelector("[data-sign-in-status]");
+        (window as unknown as { reportSignInState: (state: unknown) => void }).reportSignInState({
+          disabled: button?.disabled,
+          busy: button?.getAttribute("aria-busy"),
+          status: status?.textContent,
+          statusHidden: status?.hasAttribute("hidden"),
+        });
+      });
+    });
     await page.goto("/sign-in");
-    // Hold the request so the busy state can be observed.
+    // sign-in.js is deferred: wait until its submit handler is attached, or the click could
+    // submit the form natively and the busy state would never appear.
+    await page.locator('[data-sign-in-form][data-enhanced="true"]').waitFor({ state: "attached" });
+    // Hold the request open (aborted at the end of the test by closing the page).
     await page.route("**/sign-in/google", () => {});
     await page.getByRole("button", { name: "Continue with Google" }).click({ noWaitAfter: true });
-    // The navigation is held open, so read the current document directly rather than through
-    // locators (which wait for navigations to finish).
     await expect
-      .poll(() =>
-        page.evaluate(() => ({
-          disabled: (document.querySelector("[data-sign-in-button]") as HTMLButtonElement).disabled,
-          busy: document.querySelector("[data-sign-in-button]")?.getAttribute("aria-busy"),
-          status: document.querySelector("[data-sign-in-status]")?.textContent,
-          statusHidden: document.querySelector("[data-sign-in-status]")?.hasAttribute("hidden"),
-        })),
-      )
+      .poll(() => stateAtSubmit)
       .toEqual({
         disabled: true,
         busy: "true",

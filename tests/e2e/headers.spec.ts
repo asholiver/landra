@@ -1,4 +1,5 @@
 import { securityHeaders } from "../../src/server/http/security-headers";
+import { RUN_VERSION_ENV } from "./support/e2e-environment";
 import { expect, readServerLog, test } from "./support/fixtures";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -45,7 +46,10 @@ test.describe("security headers on every response (R9, R10, AC6)", () => {
   test("/healthz and the auth endpoints", async ({ request }) => {
     const health = await request.get("/healthz");
     expect(health.status()).toBe(200);
-    expect(await health.json()).toEqual({ status: "ok", version: "e2e" });
+    expect(await health.json()).toEqual({
+      status: "ok",
+      version: process.env[RUN_VERSION_ENV],
+    });
     expectSecurityHeaders(health.headers(), { nonce: "required" });
 
     const session = await request.get("/api/auth/get-session");
@@ -66,6 +70,26 @@ test.describe("security headers on every response (R9, R10, AC6)", () => {
     const response = await page.goto("/app");
     expect(response?.status()).toBe(200);
     expectSecurityHeaders((await response?.allHeaders()) ?? {}, { nonce: "required" });
+  });
+});
+
+test.describe("caching of authenticated pages", () => {
+  test("every /app response (document, data, 404 inside the shell) is private, no-store", async ({
+    page,
+    signInAsUser,
+  }) => {
+    await signInAsUser();
+    const document = await page.goto("/app");
+    expect(document?.status()).toBe(200);
+    expect(document?.headers()["cache-control"]).toBe("private, no-store");
+
+    const data = await page.request.get("/app.data");
+    expect(data.status()).toBe(200);
+    expect(data.headers()["cache-control"]).toBe("private, no-store");
+
+    const missing = await page.goto("/app/no-such-page");
+    expect(missing?.status()).toBe(404);
+    expect(missing?.headers()["cache-control"]).toBe("private, no-store");
   });
 });
 

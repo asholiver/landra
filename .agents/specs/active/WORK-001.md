@@ -209,6 +209,13 @@ Implementation happens locally first. External services are needed only at the s
   - a Google OAuth client;
   - an OAuth proxy secret (distinct from both auth secrets).
 
+  **Stage 2 verification items** (these can't be verified locally, and none is considered verified until checked on a real preview):
+  - **T3-L1:** security headers, including CSP, HSTS and `X-Robots-Tag`, on `/`, `/index.html`, `/sign-in`, `/sign-in/`, `/sign-in/index.html`, an asset, `/healthz` and `/app`. Also check that no headers are duplicated.
+  - **T3-L2:** the proxied Google sign-in on a preview completes, and isn't blocked by CSP `form-action`.
+  - The OAuth Proxy plugin works on preview URLs (spec Risks).
+  - **T3-M1 on Vercel** (unverified locally): Vercel sets `x-forwarded-for` to the real client IP so that it can't be spoofed, the sixth rapid `POST /sign-in/google` from one client returns 429, and varying the client-supplied `X-Forwarded-For` doesn't bypass the limit. In-memory limits are per instance (L-2, F5).
+  - `/sign-in` resolves without a redirect on Vercel.
+
   Preview secrets go into GitHub repository/PR-accessible secrets. Production secrets go only into the `production` environment (Stage 3). Delivery gives exact step-by-step instructions at this point. Covers AC4.
 - **Stage 3: production.** The owner:
   - creates the GitHub `production` environment with themselves as required reviewer;
@@ -391,9 +398,29 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
     - **T3-L4:** the E2E health check could accept an already-running server on port 4173.
     - **T3-L5:** no `Cache-Control: private, no-store` on authenticated `/app` HTML.
     - INFO: `/sign-out` returns 500 rather than 503 on invalid config (still fails closed).
+  - **After the commit:**
+    - The committed `run-gate.sh full` **FAILED** twice on the E2E test "shows the loading state while the sign-in request is in flight".
+    - Root cause: a test race. The click could land before the deferred `sign-in.js` attached its submit handler.
+    - Being made deterministic with a readiness marker, without weakening the assertion. It is not being rerun until green.
+  - **Owner decisions** (Ashley Oliver, 2026-10-05):
+    - Fix T3-M1 (through Better Auth's normal handler and rate limiter, not a home-grown limiter; plus a tested 413 body limit), T3-L3, T3-L4 and T3-L5 now, in a separate commit with the race fix.
+    - **T3-L1 and T3-L2 are explicit Stage 2 verification items.** They must not be treated as verified locally:
+      - T3-L1: headers on the `/index.html`, `/sign-in/index.html` and `/sign-in/` URL forms on Vercel;
+      - T3-L2: the CSP `form-action` allows the proxied preview sign-in redirect chain.
   - **Gates before commit:**
     - Coordinator `run-gate.sh fast` → PASSED.
     - The working-tree approved `full` in a clean environment exited 0: 197 unit, 42 integration and 36 E2E tests, Lighthouse assertions passed, audit at HIGH passed.
+  - **T3 hardening and race fix** (follow-up commit):
+    - **Race fix.** The confirmed cause was `page.evaluate` hanging while the navigation was held pending; the deferred-script race was secondary. The state is now captured in-page via `exposeFunction`, with a `data-enhanced` readiness wait. The assertion is unchanged. `--repeat-each=40` → 440 passed, 0 flaky.
+    - **T3-M1:**
+      - `POST /sign-in/google` goes through `auth.handler`, so Better Auth's limiter applies, with a custom rule of 5 requests per 10 seconds for `/sign-in/social`.
+      - The 4 KB body cap returns 413.
+      - The Node server overwrites `x-forwarded-for` with the socket address and drops `x-real-ip`. Black-box testing showed spoofing bypasses the limit without this, and doesn't with it.
+      - Behind a reverse proxy on self-hosted Node, all clients share one bucket (safe but strict).
+      - Better Auth's source was not inspected; only the documented options were used.
+    - **T3-L3:** React Router runs in development mode only when `NODE_ENV=development`. Tested for unset, empty, `test` and `production`. The test wasn't proven to fail when a stack does leak.
+    - **T3-L4:** a per-run version is required from `/healthz`, and setup fails clearly if the port is in use.
+    - **T3-L5:** `Cache-Control: private, no-store` on all `/app` responses (HTML, `.data`, and the 404 inside the shell).
 - **Local Postgres prerequisite:** integration tests must fail fast with a clear, actionable message (e.g. "PostgreSQL is not reachable at <host:port>; run `docker compose up -d`") when the database is unavailable, instead of an obscure test failure. Keep it a lightweight pre-check, not new orchestration (assigned to T2).
 ## Review state
 <!-- maintained by /ai-engineering:review: gates, security, QA, EXTERNAL REVIEW status -->

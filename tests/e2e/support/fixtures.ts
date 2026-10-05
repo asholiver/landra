@@ -6,6 +6,7 @@ import {
   E2E_BASE_URL,
   e2eServerEnvironment,
   RUN_DATABASE_ENV,
+  RUN_VERSION_ENV,
   SERVER_LOG_ENV,
 } from "./e2e-environment";
 
@@ -25,7 +26,10 @@ export type SignedInUser = { name: string; email: string };
  */
 async function signIn(page: Page, user: SignedInUser) {
   const session = await seedAuthenticatedSession({
-    env: e2eServerEnvironment(requiredEnvironment(RUN_DATABASE_ENV)),
+    env: e2eServerEnvironment(
+      requiredEnvironment(RUN_DATABASE_ENV),
+      requiredEnvironment(RUN_VERSION_ENV),
+    ),
     email: user.email,
     name: user.name,
   });

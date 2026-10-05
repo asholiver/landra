@@ -3,6 +3,16 @@ import { PRODUCT_NAME } from "../../src/shared/product";
 import { requireUser } from "../lib/require-user.server";
 import type { Route } from "./+types/app";
 
+// Everything under /app is per-user, so no cache (browser, proxy or CDN) may store it. Applies
+// to document and .data responses alike, including the 404 inside the shell.
+export const middleware: Route.MiddlewareFunction[] = [
+  async (_args, next) => {
+    const response = await next();
+    response.headers.set("Cache-Control", "private, no-store");
+    return response;
+  },
+];
+
 // Guards `/app` and every route under it (R3, AC8): signed-out requests redirect to /sign-in
 // with a sanitised return path before anything below renders.
 export async function loader({ request }: Route.LoaderArgs) {

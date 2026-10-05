@@ -20,7 +20,8 @@ import { PRERENDERED_PATHS } from "../src/shared/prerender.ts";
 
 // react-dom and friends pick their production build from NODE_ENV when first loaded, so it is
 // set before the server build is imported. An explicit NODE_ENV (tests, local runs) wins.
-process.env.NODE_ENV ??= "production";
+// An empty value counts as unset.
+if (!process.env.NODE_ENV) process.env.NODE_ENV = "production";
 
 const logger = createLogger();
 const clientDirectory = fileURLToPath(new URL("../build/client", import.meta.url));
@@ -71,8 +72,24 @@ app.use(
   }),
 );
 
+// Better Auth's rate limiter identifies a client by `x-forwarded-for`. Nothing sits in front of
+// this server, so a client-supplied value would be a spoofable bucket key: it is replaced with
+// the socket address (and `x-real-ip` is dropped). Behind a reverse proxy every client would
+// share the proxy's address and therefore one bucket: safe, but strict. A trusted-proxy setting
+// would be a deliberate future change. (Vercel sets x-forwarded-for itself.)
+app.use((request, _response, next) => {
+  const address = request.socket.remoteAddress;
+  if (address) request.headers["x-forwarded-for"] = address;
+  else delete request.headers["x-forwarded-for"];
+  delete request.headers["x-real-ip"];
+  next();
+});
+
 const build = await import(serverBuildUrl);
-app.use(createRequestHandler({ build, mode: process.env.NODE_ENV }));
+// Stack traces reach clients only when NODE_ENV is explicitly "development"; every other value
+// (unset, empty, "test", "production", anything else) runs React Router in production mode.
+const mode = process.env.NODE_ENV === "development" ? "development" : "production";
+app.use(createRequestHandler({ build, mode }));
 
 // Last resort for errors outside React Router (for example a missing static file): a fixed
 // body, never a stack trace, and the same security headers.

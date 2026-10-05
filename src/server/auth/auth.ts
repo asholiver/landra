@@ -24,7 +24,23 @@ export function buildTrustedOrigins(config: AppConfig): string[] {
 // Deliberately neutral: never reveals whether an address is on the allowlist.
 const ACCESS_NOT_AVAILABLE_MESSAGE = "Access is not available for this account.";
 
-export function createAuth(options: { database: Database; config: AppConfig; logger: Logger }) {
+/**
+ * Limit for starting Google sign-in (POST /api/auth/sign-in/social), applied by Better Auth's own
+ * rate limiter. Better Auth's default for other paths is 100 requests per 10 seconds, which is
+ * far too loose for a sign-in start.
+ */
+export const SIGN_IN_START_RATE_LIMIT = { window: 10, max: 5 } as const;
+
+export function createAuth(options: {
+  database: Database;
+  config: AppConfig;
+  logger: Logger;
+  /**
+   * Overrides Better Auth's default (rate limiting on only when NODE_ENV is production). Tests
+   * set it to exercise the limiter; leave undefined in the application.
+   */
+  rateLimitEnabled?: boolean;
+}) {
   const { database, config, logger } = options;
   const isAllowlisted = databaseAllowlistCheck(database);
   const refuseProxyCompletion = isProxyProductionDeployment(config);
@@ -55,6 +71,9 @@ export function createAuth(options: { database: Database; config: AppConfig; log
         ]
       : [],
     advanced: {
+      // The rate limiter's client key. Only this header is read; the Node server overwrites it
+      // with the socket address and Vercel sets it, so a client cannot choose its own bucket.
+      ipAddress: { ipAddressHeaders: ["x-forwarded-for"] },
       useSecureCookies: config.isProduction,
       defaultCookieAttributes: {
         httpOnly: true,
@@ -72,7 +91,11 @@ export function createAuth(options: { database: Database; config: AppConfig; log
     // Limitation (L-2): this store is in memory and per instance, so on serverless each
     // instance counts separately and limits reset on cold start. Acceptable while the owner is
     // the only user; F5 (invite stage) owns moving this to a shared store.
-    rateLimit: { storage: "memory" },
+    rateLimit: {
+      storage: "memory",
+      enabled: options.rateLimitEnabled,
+      customRules: { "/sign-in/social": { ...SIGN_IN_START_RATE_LIMIT } },
+    },
     onAPIError: { errorURL: "/sign-in" },
     hooks: {
       // Production only forwards profiles to previews; it must never complete a proxied

@@ -25,6 +25,9 @@
       button.setAttribute("aria-busy", "true");
       status.removeAttribute("hidden");
     });
+    // Marks the enhancement as active, so tests (and anything else) can tell the submit handler
+    // is attached rather than racing the deferred script.
+    form.setAttribute("data-enhanced", "true");
   }
 
   // A visitor who is already signed in goes straight on, to the server-sanitised path.
