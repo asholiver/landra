@@ -3,7 +3,7 @@
 Keep this concise. Project-specific facts only: global engineering standards come from the ai-engineering plugin and are not copied here.
 
 ## Project
-Landra: an AI-powered job search workspace, built using agent-driven software development. Greenfield; the tech stack is not chosen yet.
+An AI-powered job-search copilot (product name not yet chosen; "landra" is only the repository's working name), built using agent-driven software development. Stack and architecture: see `.agents/project/architecture.md` and ADRs in `.agents/decisions/`. Roadmap: `.agents/project/roadmap.md` (feature IDs are permanent).
 
 ## Canonical commands
 Quality gates (`fast`, `full`, `externalReview`) are defined only in `.agents/gates.json` (currently placeholders that fail until the stack is chosen).
