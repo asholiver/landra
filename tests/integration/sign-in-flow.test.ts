@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { createAuth, SIGN_IN_START_RATE_LIMIT } from "../../src/server/auth/auth";
+import { createAuth } from "../../src/server/auth/auth";
 import {
   handleGoogleSignIn,
   MAX_SIGN_IN_BODY_BYTES,
@@ -18,6 +18,8 @@ const googleEnvironment = {
   GOOGLE_CLIENT_SECRET: "test-client-secret-value",
 };
 const ORIGIN = "http://localhost:5173";
+/** Better Auth's built-in limit for every "/sign-in*" path: 3 requests per 10 seconds. */
+const SIGN_IN_START_LIMIT = 3;
 const silentLogger = createLogger({ minimumLevel: "error", write: () => {} });
 
 function runtime(extraEnvironment: Record<string, string>) {
@@ -152,9 +154,9 @@ describe("handleGoogleSignIn", () => {
   });
 
   describe("rate limiting (Better Auth's own limiter)", () => {
-    it("returns 429 on the request after the configured limit, per client", async () => {
+    it("returns 429 on the request after the built-in limit, per client", async () => {
       const client = newClientAddress();
-      for (let attempt = 0; attempt < SIGN_IN_START_RATE_LIMIT.max; attempt += 1) {
+      for (let attempt = 0; attempt < SIGN_IN_START_LIMIT; attempt += 1) {
         expect((await start(post({ client }))).status, `attempt ${attempt + 1}`).toBe(302);
       }
       const limited = await start(post({ client }));
@@ -163,6 +165,19 @@ describe("handleGoogleSignIn", () => {
 
       // A different client is unaffected.
       expect((await start(post({}))).status).toBe(302);
+    });
+
+    // Without trustedProxies Better Auth uses X-Forwarded-For only when it holds exactly one
+    // address. A multi-value header gives no per-client key, so every such request shares one
+    // bucket (safe but strict): varying the chain does not buy a fresh bucket.
+    it("does not use a multi-value X-Forwarded-For as a per-client key", async () => {
+      const statuses: number[] = [];
+      for (let attempt = 0; attempt < SIGN_IN_START_LIMIT + 3; attempt += 1) {
+        const chain = `198.51.100.${attempt + 1}, 192.0.2.${attempt + 1}`;
+        statuses.push((await start(post({ client: chain }))).status);
+      }
+      expect(statuses.slice(0, SIGN_IN_START_LIMIT)).toEqual([302, 302, 302]);
+      expect(statuses.slice(SIGN_IN_START_LIMIT)).toEqual([429, 429, 429]);
     });
   });
 });

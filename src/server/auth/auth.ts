@@ -24,13 +24,6 @@ export function buildTrustedOrigins(config: AppConfig): string[] {
 // Deliberately neutral: never reveals whether an address is on the allowlist.
 const ACCESS_NOT_AVAILABLE_MESSAGE = "Access is not available for this account.";
 
-/**
- * Limit for starting Google sign-in (POST /api/auth/sign-in/social), applied by Better Auth's own
- * rate limiter. Better Auth's default for other paths is 100 requests per 10 seconds, which is
- * far too loose for a sign-in start.
- */
-export const SIGN_IN_START_RATE_LIMIT = { window: 10, max: 5 } as const;
-
 export function createAuth(options: {
   database: Database;
   config: AppConfig;
@@ -71,8 +64,10 @@ export function createAuth(options: {
         ]
       : [],
     advanced: {
-      // The rate limiter's client key. Only this header is read; the Node server overwrites it
-      // with the socket address and Vercel sets it, so a client cannot choose its own bucket.
+      // The rate limiter's client key (this is also Better Auth's default). Without
+      // trustedProxies it uses the header only when it holds exactly ONE address; a multi-value
+      // header yields no key, so all such requests share one bucket (safe, but strict). The
+      // Node server overwrites the header with the socket address; Vercel sets it.
       ipAddress: { ipAddressHeaders: ["x-forwarded-for"] },
       useSecureCookies: config.isProduction,
       defaultCookieAttributes: {
@@ -91,11 +86,10 @@ export function createAuth(options: {
     // Limitation (L-2): this store is in memory and per instance, so on serverless each
     // instance counts separately and limits reset on cold start. Acceptable while the owner is
     // the only user; F5 (invite stage) owns moving this to a shared store.
-    rateLimit: {
-      storage: "memory",
-      enabled: options.rateLimitEnabled,
-      customRules: { "/sign-in/social": { ...SIGN_IN_START_RATE_LIMIT } },
-    },
+    // No custom rules on purpose: Better Auth's built-in special rule already limits every
+    // "/sign-in*" path (including /sign-in/social, the Google sign-in start) to 3 requests per
+    // 10 seconds, and a custom rule would replace that stricter default.
+    rateLimit: { storage: "memory", enabled: options.rateLimitEnabled },
     onAPIError: { errorURL: "/sign-in" },
     hooks: {
       // Production only forwards profiles to previews; it must never complete a proxied

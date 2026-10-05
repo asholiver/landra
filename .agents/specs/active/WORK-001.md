@@ -213,7 +213,13 @@ Implementation happens locally first. External services are needed only at the s
   - **T3-L1:** security headers, including CSP, HSTS and `X-Robots-Tag`, on `/`, `/index.html`, `/sign-in`, `/sign-in/`, `/sign-in/index.html`, an asset, `/healthz` and `/app`. Also check that no headers are duplicated.
   - **T3-L2:** the proxied Google sign-in on a preview completes, and isn't blocked by CSP `form-action`.
   - The OAuth Proxy plugin works on preview URLs (spec Risks).
-  - **T3-M1 on Vercel** (unverified locally): Vercel sets `x-forwarded-for` to the real client IP so that it can't be spoofed, the sixth rapid `POST /sign-in/google` from one client returns 429, and varying the client-supplied `X-Forwarded-For` doesn't bypass the limit. In-memory limits are per instance (L-2, F5).
+  - **T3-M1 on Vercel** (unverified locally). Source-verified facts (better-auth 1.7.7 `getIP`): without `trustedProxies`, `x-forwarded-for` is used only when it holds exactly one IP. A multi-value header resolves to no IP, and all clients then share one per-path bucket of 3 requests per 10 seconds, which could lock every user out of sign-in. On a real preview, verify:
+    - the `x-forwarded-for` header the function receives is a single, Vercel-overwritten client IP (log the header's value count, never the IP itself);
+    - the 4th rapid `POST /sign-in/google` from one client returns 429;
+    - a second client is unaffected;
+    - varying the client-supplied `X-Forwarded-For` doesn't bypass the limit.
+
+    If the header holds multiple values, configure `advanced.ipAddress` (e.g. Vercel's documented client-IP header, or `trustedProxies`) before production. In-memory limits are per instance (L-2, F5).
   - `/sign-in` resolves without a redirect on Vercel.
 
   Preview secrets go into GitHub repository/PR-accessible secrets. Production secrets go only into the `production` environment (Stage 3). Delivery gives exact step-by-step instructions at this point. Covers AC4.
@@ -417,7 +423,10 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
       - The 4 KB body cap returns 413.
       - The Node server overwrites `x-forwarded-for` with the socket address and drops `x-real-ip`. Black-box testing showed spoofing bypasses the limit without this, and doesn't with it.
       - Behind a reverse proxy on self-hosted Node, all clients share one bucket (safe but strict).
-      - Better Auth's source was not inspected; only the documented options were used.
+      - **Correction** (owner granted read-only source inspection; the coordinator read better-auth 1.7.7 `rate-limiter/index.mjs` and core `utils/ip.mjs`):
+        - Better Auth's built-in rule already limits every `/sign-in*` path to 3 requests per 10 seconds, and custom rules apply after it, so the 5-per-10-seconds custom rule had *loosened* that limit. It was removed; the built-in default applies, and the 4th rapid POST returns 429.
+        - `getIP` trusts `x-forwarded-for` only when it holds a single value. A multi-value header goes to one shared bucket (now tested). A shared bucket on Vercel would mean a sign-in lockout for every user (Stage 2 check).
+        - The E2E rate-limit test now uses its own server per run (free port, per-run version): a test-design fix, after repeats sharing a port collided. `--repeat-each=10` → 10/10 passed.
     - **T3-L3:** React Router runs in development mode only when `NODE_ENV=development`. Tested for unset, empty, `test` and `production`. The test wasn't proven to fail when a stack does leak.
     - **T3-L4:** a per-run version is required from `/healthz`, and setup fails clearly if the port is in use.
     - **T3-L5:** `Cache-Control: private, no-store` on all `/app` responses (HTML, `.data`, and the 404 inside the shell).
