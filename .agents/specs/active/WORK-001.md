@@ -213,7 +213,41 @@ Implementation happens locally first. External services are needed only at the s
 Secrets needed by Stage 3: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `NEON_API_KEY`, `NEON_PROJECT_ID`, `DATABASE_URL` (prod, pooled), `DATABASE_URL_UNPOOLED` (prod, migrations), `BETTER_AUTH_SECRET`, `OAUTH_PROXY_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
 ## Implementation state
 <!-- maintained by /ai-engineering:deliver: tasks, owners, status, gate results -->
--
+Tasks run one at a time in this checkout on `work/WORK-001-f0-foundation` (no `worktree.baseRef`). Stage 0 only.
+
+| Task | Owner | Depends on | Scope | Covers | Status |
+|---|---|---|---|---|---|
+| T1 Toolchain scaffold and proposed gates | ai-engineering:platform | — | `package.json`, lockfile, `.nvmrc`, `.npmrc`, `tsconfig*.json`, `biome.json`, `vite.config.ts`, `react-router.config.ts` (preset only when building for Vercel), `vitest.config.ts`, `playwright.config.ts`, `docker-compose.yml`, `.env.example`, `.gitignore`, a minimal `app/` (root and a route) so the build works, README setup section; **proposes** `fast`/`full` in `.agents/gates.json` (working tree only) | A2, A3, R1, AC1, part of AC2 | done (uncommitted) |
+| ⛔ Gate checkpoint | Owner | T1 | Owner reviews the proposed gate commands; they're committed only after approval | — | done (approved by Ashley Oliver, 2026-10-05) |
+| T2 Server foundation: config, database, auth, allowlist | ai-engineering:backend | checkpoint | `src/server/**`, `src/shared/**`, `drizzle/**`, `drizzle.config.ts`, `scripts/allowlist.ts`, auth resource route `app/routes/api.auth.$.ts`, `app/routes/healthz.ts`, session-guard helper, unit and integration tests | R3–R7, R11–R13, BR1–BR3, AC8, AC11, part of AC13 | pending |
+| T3 Public and app UI, headers, noindex, accessibility and performance | ai-engineering:frontend | T2 | `app/**` (except T2's routes), `app/entry.server.tsx` (security headers, nonce CSP, X-Robots-Tag, X-Request-Id), `src/shared/product.ts` (working label), `public/robots.txt`, E2E + axe tests, Lighthouse CI config | R2, R8–R10, AC6 (locally), AC12, AC14 | pending |
+| T4 CI workflows and Node-build smoke | ai-engineering:platform | T3 | `.github/workflows/**`, `.github/dependabot.yml`, `vercel.json`, Node-build smoke script, secret-scan config | R14–R18 (workflow files only), AC10, AC13; jobs needing secrets report SKIPPED until Stage 2 | pending |
+| Prove | coordinator + qa + security-reviewer | T4 | full gate, QA against the spec, security review (auth, secrets, headers, CI) | — | pending |
+
+T1 results (2026-10-05):
+- **A3 Node version: 24.**
+  - Vercel lists 24.x as a supported (and default) Node version, and `engines.node` overrides the project setting.
+  - React Router 7.18.4, Vite 8.3.2, Vitest 5.0.3 and Playwright 1.63.0 all allow Node 24.
+  - better-auth 1.7.7 and drizzle 0.45.3 / drizzle-kit 0.31.11 declare no engines field; T2 confirms them in practice.
+  - Pinned in: `.nvmrc` (24), `engines.node` (24.x), `packageManager` (pnpm 10.34.6), `.npmrc` (`engine-strict=true`).
+- **Version notes:**
+  - React Router is pinned to 7.18.4, the latest 7.x; npm `latest` is 8.x and ADR-0001 specifies v7.
+  - TypeScript is pinned to 5.9.3, because @react-router/dev 7 requires TypeScript ^5 or ^6.
+- **@vercel/react-router** is a devDependency. As a runtime dependency it pulls in a high-severity `braces` advisory with no fix; it's only used at build time.
+- **No dependency build scripts are allowed;** esbuild's is ignored.
+- **Coordinator verification on Node 24.21.0:**
+  - `run-gate.sh fast` → `GATE fast: FAILED (exit 1)`, as expected, because the committed placeholder is used until the checkpoint.
+  - Working-tree `pnpm run check:full` → exit 0: lint, typecheck, 1 unit test, both builds, 1 E2E test, and the audit reported no known vulnerabilities.
+
+Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
+- **Gate commands** are listed explicitly in `.agents/gates.json`:
+  - `fast` = lint, typecheck, unit tests;
+  - `full` = fast + integration tests + Node build + Vercel build + E2E + `pnpm audit --prod --audit-level high`.
+  - The `check:fast`/`check:full` package scripts were removed, so `gates.json` is the only gate definition.
+  - Every later addition to a gate (axe, Lighthouse, Node-build startup check, secret scan) is an explicit `gates.json` change that review flags and the owner approves. It's never hidden behind a package script.
+  - Known residual gap: individual commands still resolve through `package.json`. Recorded as a candidate improvement for the AI Engineering System, not redesigned here.
+- **Node:** the owner's machine-wide nvm default stays unchanged. Coordinator and agents activate the repository's pinned Node (`nvm use`, reading `.nvmrc`) within their own shell before running pnpm or gates. No global environment changes.
+- **Local Postgres prerequisite:** integration tests must fail fast with a clear, actionable message (e.g. "PostgreSQL is not reachable at <host:port>; run `docker compose up -d`") when the database is unavailable, instead of an obscure test failure. Keep it a lightweight pre-check, not new orchestration (assigned to T2).
 ## Review state
 <!-- maintained by /ai-engineering:review: gates, security, QA, EXTERNAL REVIEW status -->
 -
