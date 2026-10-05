@@ -59,5 +59,5 @@ Proposed rule (for a human to raise in the ai-engineering-system repository; not
     - `sam delete --stack-name x` must ask;
     - prose such as "same ... delete" must not match `sam` (verify the word boundary already prevents this).
 - Upstream consideration: nudge or hook against shell-based file writes by implementation agents, since prompt instructions alone did not prevent it.
-- Project rule (proposed wording for AGENTS.md, human to apply): "Edit documents with the Edit/Write tools, not shell heredocs; use Grep/Read for inspection; run quality gates as their own single-purpose command; never route around the Bash guard."
+- **AGENTS.md: not adopted** (owner decision, 2026-10-05). Using Edit/Write instead of shell is a tool-specific workaround for current guard and agent behaviour, not a project engineering rule. The evidence is kept here for the post-F0 ai-engineering-system review.
 - No code change in this project; the installed guard is not to be modified from here.

@@ -16,6 +16,6 @@ General (proposed guardrail)
 
 Proposed rule (for the ai-engineering-system repository, to be designed and decided there): during review, also diff gate-relevant files between the base ref and HEAD (package.json `scripts`, test/lint config files, and a project-declared list of "gate-defining files" in gates.json) and flag changes the same way gate-command changes are flagged. Optionally run gates using scripts and configs taken from the base ref. In setup/deliver, warn when a proposed gate command is a single indirection to a package script.
 ## Follow-up
-- rule (project, proposed AGENTS.md wording; human applies): "Changes to package.json scripts or test/lint/build configuration that weaken or remove a gate step are gate changes: call them out explicitly for owner review."
+- **AGENTS.md: not adopted** (owner decision, 2026-10-05). This is mainly a global gate-integrity problem and a candidate for the post-F0 ai-engineering-system review. The requirement still stands: changes capable of weakening certification (gate commands, package scripts, test/lint/build config) need appropriate review.
 - code change (decided by owner, applied by the delivery coordinator in commit c7b2c87): gates.json lists steps explicitly; `check:*` scripts removed.
 - ai-engineering-system improvements above: raise in that repository.

@@ -57,6 +57,9 @@ Success: the owner can use the product from any device at a free public URL to t
 - N1 Product name and brand: required before F15 removes noindex.
 - Commercial intent: any pricing, payments or ads takes the product outside Vercel Hobby's terms (ADR-0001).
 - Error tracking/monitoring beyond Vercel's 1-hour logs: decide before F5 (inviting others).
+- **Post-F0 ai-engineering-system review** (not a product feature):
+  - Review the candidates in `.agents/failures/` and `.agents/learnings/`: guard false positives, gate integrity through package scripts, narrow approval for destructive capabilities, and failed gates staying visible instead of being rerun until green.
+  - Decide deliberately what to promote and how (planning D19).
 
 ## Parked (undecided whether ever)
 - CV tailoring and cover-letter generation (depends on F8).
