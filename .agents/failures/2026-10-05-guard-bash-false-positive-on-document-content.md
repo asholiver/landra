@@ -1,7 +1,7 @@
 # Learning: guard-bash.sh false positives: keywords in data rather than executed operations
-Two categories, same guard (plugin `scripts/guard-bash.sh`, ai-engineering v0.2.0, PreToolUse Bash), four instances:
+Two categories, same guard (plugin `scripts/guard-bash.sh`, ai-engineering v0.2.0, PreToolUse Bash), five instances:
 1. Keywords inside heredoc/document/source data being written (instances 1 and 3).
-2. Dangerous-operation keywords used as arguments to read-only inspection/search commands (instance 2) or as path text in a URL argument to a download command (instance 4).
+2. Dangerous-operation keywords used as arguments to read-only inspection/search commands (instance 2) or as path text in a URL argument to read-only `curl` commands (instances 4 and 5).
 ## Context
 ### Category 1: document content in a heredoc
 2026-10-05, repo asholiver/landra, WORK-001 planning (approving the F0 spec). The assistant ran `python3 - <<'EOF' ... EOF` whose body only did string replacements in `.agents/specs/active/WORK-001.md`. The replacement prose contained "pnpm audit", "vercel deploy --prebuilt", "production deploy", "release" and "/healthz". The PreToolUse Bash hook returned `permissionDecision: "ask"` as a high-impact operation. The user rejected the prompt and identified it as a false positive. No deploy, release, publish, push or merge was occurring.
@@ -18,12 +18,19 @@ Process lesson: this agent had already been told to use Edit/Write for files and
 Likely matching rule (not confirmed; the guard's output was not captured here): the deploy/release script rule `(^|[[:space:]])[^[:space:]]*/[^[:space:]/]*(deploy|release|publish|destroy|teardown)[^[:space:]/]*`. Any whitespace-delimited token with a path segment containing "release" (here `releases`) matches, regardless of the executed program (curl). Keyword in data (a URL argument), not an executed operation; same root-cause family as instances 1-3.
 Separate genuine defect noticed by the owner: the URL was malformed (`github.com//download/...`), so even if approved it would have failed. A denial prompt is also a review point.
 Resolution (narrowest mechanism, no guard change, no route-around): the coordinator verified the release exists and that the upstream README documents an official image `ghcr.io/gitleaks/gitleaks`. The scanner is pinned as that image by immutable digest, obtained with read-only `docker manifest inspect`, which removes the need to download a checksum file.
+### Instance 5 (category 2): "releases/latest" in read-only GitHub API GETs
+2026-10-06, WORK-001 Prove stage, security-reviewer agent. For a provenance check of four pinned GitHub Actions, the agent ran one compound Bash `for` loop issuing read-only `curl` GET requests to api.github.com (default branch, compare, commits, `/repos/<repo>/releases/latest`, security-advisories), piped to `jq` with labels including `tag_name` and `latest=`. The command was flagged as a high-impact operation; the owner denied it as a false positive (read-only security/provenance investigation classified as deploy/release) and instructed: do not resubmit the compound command; use narrower read-only mechanisms (web/read tooling or small single-purpose commands).
+Likely trigger (reported by the agent, unconfirmed): the URL segment `releases/latest` matching the deploy/release path rule, the same pattern as instance 4.
+Resolution (no guard change, no route-around): the agent completed provenance with separate single-purpose GETs that avoid that segment (git/ref/tags, compare, commits, branches-where-head, security-advisories, `/advisories?affects=`).
+Consequence: "is the pinned tag the latest version of each action" remained UNVERIFIED. The false positive cost verification coverage, not just time.
+Additional lessons: (1) a compound command enlarges the blast radius of a false positive, since one keyword blocks the whole investigation; (2) the same release-path false positive recurred within one day (instances 4 and 5), strengthening the case for classifying by executed program and HTTP method (a GET to an API is read-only) in the post-F0 review.
 ## Observation
 The guard classifies intent by regex over the whole command text (newlines/tabs collapsed to spaces), including heredoc bodies, string literals and arguments. Likely matches:
 - Category 1: the deploy/release task rule `(npm|pnpm|yarn|bun)<ws>(.*<ws>)?[^ ]*(deploy|release|publish|destroy|teardown)[^ ]*`, since "pnpm" and "deploy" both appear anywhere in the text; possibly the deploy/release script path rule.
 - Category 2: the SQL TRUNCATE rule matching a bare word anywhere in the text, regardless of which program is executed.
 - Instance 3: the serverless/sls/sam rule `(serverless|sls|sam)<ws>(.*<ws>)?(deploy|remove|delete)`, matching "serverless" and "remove" arbitrarily far apart inside written source text. Ordinary words in comments and code ("remove", "delete", "deploy") are common, so any prose mentioning these platforms is at risk.
 - Instance 4: the deploy/release script path rule (likely) matching a URL path segment such as `releases` in a `curl` argument.
+- Instance 5: the same path rule (likely, unconfirmed) matching `releases/latest` in `curl` GET URLs to api.github.com.
 
 The script itself states that it "errs towards asking" and "only sees the command text". These false positives are a known limitation, not a malfunction.
 ## Cause
@@ -40,6 +47,7 @@ Matching does not distinguish executed command tokens from data (heredoc bodies,
 - Keep commit messages and shell commands free of prose that resembles deploy/release/destructive commands.
 - Never route around the guard for a real high-impact command.
 - Read a denial prompt as a review point too (instance 4: the denied URL was also malformed). Prefer a narrower mechanism that removes the need for the flagged command (e.g. pin a scanner image by digest via read-only `docker manifest inspect` instead of downloading a checksum file).
+- Prefer small single-purpose read-only calls over compound loops for investigations (instance 5): a compound command lets one flagged keyword block every step, and here left the "pinned tag is latest" check unverified. State any coverage lost to a denial as UNVERIFIED rather than silently dropping it.
 - Source code is data too: write and edit it with Edit/Write, never `sed`/`python -c`/heredoc text transformations. Because instructions alone proved weak (instance 3), upstream should consider reinforcing this with implementation-agent guidance and a hook nudge discouraging shell-based file writes.
 ## Scope
 General (proposed guardrail)
@@ -72,6 +80,12 @@ Proposed rule (for a human to raise in the ai-engineering-system repository; not
     - `./scripts/release.sh` and `pnpm release` MUST ask;
     - `git push --tags` MUST ask.
     - Suggested approach: classify by executed program and verb (download/read vs create/publish) rather than by path text.
+  - Instance 5 (release path in API URL, HTTP method):
+    - `curl -s https://api.github.com/repos/o/r/releases/latest` must NOT ask;
+    - `curl -s -X POST https://api.github.com/repos/o/r/releases` (creates a release) MUST ask;
+    - `gh api repos/o/r/releases/latest` should NOT ask;
+    - `gh api -X POST repos/o/r/releases` MUST ask.
+    - Suggested approach: classify by executed program and HTTP method (GET is read-only); recurrence within one day (instances 4 and 5) supports prioritising this in the post-F0 review.
 - Upstream consideration: nudge or hook against shell-based file writes by implementation agents, since prompt instructions alone did not prevent it.
 - **AGENTS.md: not adopted** (owner decision, 2026-10-05). Using Edit/Write instead of shell is a tool-specific workaround for current guard and agent behaviour, not a project engineering rule. The evidence is kept here for the post-F0 ai-engineering-system review.
 - No code change in this project; the installed guard is not to be modified from here.
