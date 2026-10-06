@@ -15,12 +15,17 @@ export async function action({ request }: Route.ActionArgs) {
     if (!isTrustedOrigin(request.headers, buildTrustedOrigins(config))) {
       return new Response("Forbidden", { status: 403 });
     }
-    // Better Auth's signOut swallows a failed session delete and still clears the cookie, which
-    // would leave the server session alive while the user believes they signed out. Reading the
-    // session first throws when the database is unreachable, so that case fails closed (503)
-    // with the cookie untouched. (A database that fails between this read and the delete is
-    // still not detected.)
-    await getAuth().api.getSession({ headers: request.headers });
+    // Better Auth's signOut only logs a failed session delete and still clears the cookie, which
+    // would leave the server session alive while the user believes they signed out. So the
+    // deletion is done here first, by the token of the session Better Auth has just verified
+    // (signed cookie), and it THROWS on any failure: an unreachable database (the read throws)
+    // and a database that accepts reads but rejects writes both end in 503 with the cookie
+    // untouched. Deleting by that token, rather than re-reading, leaves no read-then-delete race.
+    // signOut afterwards only clears the cookies; its own delete finds nothing left to remove.
+    const current = await getAuth().api.getSession({ headers: request.headers });
+    if (current) {
+      await (await getAuth().$context).internalAdapter.deleteSession(current.session.token);
+    }
     const { headers } = await getAuth().api.signOut({
       headers: request.headers,
       returnHeaders: true,

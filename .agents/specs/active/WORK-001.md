@@ -242,7 +242,7 @@ Stage 3 configuration. Production gets no Neon management credentials (owner dec
 Stage 2 configuration, repository level. Preview Vercel resources live in a **separate Vercel team or account with no production project** (owner decision B/F1, ADR-0003 amended).
 - **Secrets:** `PREVIEW_VERCEL_TOKEN`, `PREVIEW_VERCEL_ORG_ID`, `PREVIEW_VERCEL_PROJECT_ID`, `PREVIEW_NEON_API_KEY`, `PREVIEW_NEON_PROJECT_ID`, `PREVIEW_BETTER_AUTH_SECRET`, `PREVIEW_OAUTH_PROXY_SECRET`, `PREVIEW_GOOGLE_CLIENT_ID`, `PREVIEW_GOOGLE_CLIENT_SECRET`.
 - **Variables:** `PREVIEW_OAUTH_PROXY_PRODUCTION_URL`, `PREVIEW_ALIAS_PREFIX`.
-- `PREVIEW_GOOGLE_CLIENT_SECRET` is **subject to the F3 investigation.** If previews need the production Google client secret, that isn't accepted automatically.
+- **No `PREVIEW_GOOGLE_CLIENT_SECRET`** (F3 outcome, below). `PREVIEW_GOOGLE_CLIENT_ID` is the same public client ID as production. The Google client's redirect URIs list production only.
 ## Implementation state
 <!-- maintained by /ai-engineering:deliver: tasks, owners, status, gate results -->
 Tasks run one at a time in this checkout on `work/WORK-001-f0-foundation` (no `worktree.baseRef`). Stage 0 only.
@@ -570,6 +570,72 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
     - PR required, merge commits only, review threads resolved;
     - required status check `Quality gate (full gate incl. Node smoke and secret scan)` bound to GitHub Actions (integration 15368), with "up to date before merging" on.
   - **Not authorised:** merging, Stage 2 resources, secrets, deployment.
+- **F3 outcome** (2026-10-06; investigated against the installed better-auth 1.7.7 with file and line evidence):
+  - **What the preview does:**
+    - Sign-in start builds the authorization URL with the client ID, state and an S256 PKCE challenge. It never includes the client secret.
+    - The OAuth proxy rewrites `redirect_uri` to the production callback, so production does the code exchange.
+    - The preview only decrypts the proxied profile at `/callback/:id/oauth-proxy`.
+    - **The preview never needs the Google client secret.**
+  - **The one coupling:** Better Auth's Google provider throws if `clientSecret` is empty when building the authorization URL. A proxy preview therefore passes a fixed, non-secret placeholder (`unused-on-proxy-preview`).
+  - **Safeguard:** a secretless deployment refuses, with 404, every route that would send the secret to Google: `/callback/:id`, `/refresh-token`, `/get-access-token`, `/account-info`.
+  - **Config rule:** the client ID alone is accepted **only** for a proxy preview. That means `OAUTH_PROXY_SECRET` and `OAUTH_PROXY_PRODUCTION_URL` are set, the proxy production origin differs from `BETTER_AUTH_URL`'s, and `VERCEL_ENV !== "production"`. Production and non-proxy deployments still require both values. A secret without an ID is rejected.
+  - **Tests:**
+    - 8 config unit tests;
+    - 8 integration tests, including a NEGATIVE test: the four routes return 404 and a stubbed `fetch` records zero outbound calls; the placeholder appears in neither the URL nor cookies.
+  - **Workflow and docs:** CI no longer requires or passes `PREVIEW_GOOGLE_CLIENT_SECRET`. README and `.env.example` updated.
+  - **Risks:**
+    - The behaviour depends on better-auth internals, so re-run the negative tests on any Better Auth upgrade.
+    - A preview *may* still hold the real secret if one is configured. That isn't hard-forbidden, so that local development with real credentials keeps working.
+  - **Unverified until Stage 2:** the real preview → Google → production → preview flow, and the `VERCEL_ENV` value on previews.
+  - **Status:** uncommitted, pending security review of the diff.
+  - **Independent review of the F3 diff** (2026-10-06): **OK to commit; no BLOCKER or HIGH.**
+    - The placeholder has no route to Google. The only secret users are `validateAuthorizationCode` and `refreshAccessToken`, and every route that calls them is guarded.
+    - User hooks run before plugin hooks.
+    - Path matching uses route templates.
+    - ID-token sign-in is verified against Google's JWKS.
+    - Production can only be misclassified through misconfiguration, which fails closed.
+    - HIGH-4 and L-B are not weakened.
+    - Findings, being fixed:
+      - **F3R-M1 (MEDIUM):** the zero-outbound-fetch test can't fail, because the requests are rejected earlier anyway. Real-state and seeded-token tests to be added, and shown to fail when the guard is removed.
+      - **F3R-L1 (LOW):** the "no secret on previews" convention isn't enforced. Config will reject `GOOGLE_CLIENT_SECRET` on a proxy preview, per the owner's rule against automatic exposure.
+      - **F3R-L2 (LOW):** the guard list is tied to better-auth 1.7.7. An endpoint-enumeration test will force review on upgrade.
+    - **Fix results** (2026-10-06, backend agent; each new test was shown to fail when its fix was disabled, then reverted):
+      - **312665c-M1:** controls added to `database-unavailable.spec.ts`: a foreign Origin gets 403; get-session with no cookie gets 200 null. With a broken config, the 5 old 503 tests passed vacuously while both controls failed.
+      - **312665c-L1:**
+        - `sign-out.ts` now calls `internalAdapter.deleteSession` by the verified token, which throws on failure, *before* `signOut` clears the cookie. That closes the read-then-delete race.
+        - New `sign-out-route.test.ts`: the session read uses real Postgres; the delete failure is injected by stubbing `deleteSession` (owner-approved non-destructive injection, chosen over DB DDL). Result: 503, no Set-Cookie, the row remains, `signOut` is not called. With the fix disabled, the test failed (302 instead of 503).
+        - A first attempt bundled a heredoc file write, formatting, a test run and SQL DDL text in one shell command. The owner **denied** it; it wasn't resubmitted.
+      - **F3R-M1:** real-state callback and seeded expired-token tests. With the guard disabled, all 4 failed, recording a request to `oauth2.googleapis.com/token`.
+      - **F3R-L1:** config rejects `GOOGLE_CLIENT_SECRET` on a proxy preview, naming the variable only. Local and non-proxy deployments are unaffected.
+      - **F3R-L2:** `auth-endpoints.test.ts` checks endpoints against an allowlist of 32 reviewed `auth.api` paths (better-auth 1.7.7).
+      - **Review L2 (coordinator):** `preview-cleanup.yml` concurrency group changed to `preview-<PR>`, shared with the preview job. actionlint clean.
+      - **Agent verification:** 219 unit, 62 integration and 49 E2E tests passed, plus lint, typecheck and both builds.
+    - **Third independent review** of the full uncommitted diff (2026-10-06): **OK to commit; no BLOCKER, HIGH or MEDIUM.**
+      - Reviewer runs: 219 unit, 62 integration and 49 E2E tests passed.
+      - Sign-out has no remaining fail-open path, cookie attributes are unchanged, and the stub-based test can fail.
+      - F3R-M1, L1 and L2 hold.
+      - **Remaining LOW (follow-up before Stage 2):** a PR closed while CI is still in `quality` can still get a preview branch and deployment, because the preview job joins `preview-<N>` only after `quality`. Proposed fix: the preview job's first step checks that the PR is still `open` (`pull-requests: read`) and skips otherwise. Bounded by the 14-day branch expiry.
+      - INFO: assert that `deleteSession` was called with the seeded token.
+      - UNVERIFIED by the reviewer: re-running the guard-disabled proof; live cross-workflow concurrency.
+    - Optional Stage 2 check: fail CI if the preview Vercel project's env contains `GOOGLE_CLIENT_SECRET`. If a `PREVIEW_GOOGLE_CLIENT_SECRET` repository secret is ever created, delete it.
+- **Independent security review of `312665c`** (2026-10-06): **accepted before Stage 2; no BLOCKER or HIGH.**
+  - **Verified:**
+    - the sign-out Origin and CSRF behaviour is unchanged, with the cookie cache off;
+    - CI concurrency keys can't be influenced by a PR;
+    - the informational audit can't hide a gate failure;
+    - the Neon cleanup keeps the key out of argv, URLs and logs, validates the project, PR and branch ids, refuses default branches, uses `permissions: {}`, and can't be triggered by a fork;
+    - the Postgres digest;
+    - no install scripts;
+    - README security wording is accurate.
+  - **Findings:**
+    - **M1 (MEDIUM):** `database-unavailable.spec.ts` can pass vacuously when config is invalid, because ConfigError gives the same 503. Being fixed with a valid-config control.
+    - **L1 (LOW, security):** sign-out is still fail-open when the database accepts reads but rejects writes, because Better Auth `signOut` swallows `deleteSession` failures. Being fixed: delete the session explicitly before clearing the cookie, with a test that blocks deletes.
+    - **L2 (LOW):** a PR closed while its preview is still being created can leave a Neon branch behind until it expires. Fix: share the concurrency group between preview and cleanup.
+    - **L3 (LOW):** the 7-day cooldown is met only by `vercel` itself; `@vercel/oidc` and `@vercel/cli-config` were under 4 days old. **Clarification:** the A6 cooldown statement covers the direct `vercel` dependency only, not its transitive tree. Whether to enforce it lockfile-wide (pnpm `minimumReleaseAge`) is an open owner decision. Reword the claim; whole-lockfile enforcement (pnpm `minimumReleaseAge`) is an owner decision.
+  - **INFO:**
+    - the informational audit's summary shows an empty block if `pnpm audit` fails;
+    - Dependabot doesn't track Docker image pins;
+    - **UNVERIFIED:** Neon API `search`/`limit` semantics and DELETE idempotency, and whether a skipped production job ever enters its concurrency group.
   - **Open before Stage 2:**
     - the F3 investigation;
     - a security review of `312665c`;

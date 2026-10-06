@@ -9,7 +9,13 @@ import * as schema from "../db/schema";
 import type { Logger } from "../logging/logger";
 import { databaseAllowlistCheck, decideAccess } from "./access-policy";
 import { createBetterAuthLogLine } from "./auth-logger";
-import { isProxyCompletionPath, isProxyProductionDeployment } from "./oauth-proxy-guard";
+import {
+  isGoogleTokenCallPath,
+  isProxyCompletionPath,
+  isProxyProductionDeployment,
+  isSecretlessGoogleDeployment,
+  UNUSED_PREVIEW_CLIENT_SECRET,
+} from "./oauth-proxy-guard";
 
 const LOCAL_DEVELOPMENT_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"];
 
@@ -37,6 +43,7 @@ export function createAuth(options: {
   const { database, config, logger } = options;
   const isAllowlisted = databaseAllowlistCheck(database);
   const refuseProxyCompletion = isProxyProductionDeployment(config);
+  const refuseGoogleTokenCalls = isSecretlessGoogleDeployment(config);
 
   return betterAuth({
     appName: "App",
@@ -50,7 +57,9 @@ export function createAuth(options: {
       ? {
           google: {
             clientId: config.google.clientId,
-            clientSecret: config.google.clientSecret,
+            // F3: a proxy preview has no secret; Better Auth needs a non-empty value to start the
+            // flow. The placeholder is never sent anywhere (see oauth-proxy-guard.ts).
+            clientSecret: config.google.clientSecret ?? UNUSED_PREVIEW_CLIENT_SECRET,
             scope: ["openid", "email", "profile"],
           },
         }
@@ -96,6 +105,11 @@ export function createAuth(options: {
       // sign-in itself (see oauth-proxy-guard.ts).
       before: createAuthMiddleware(async (context) => {
         if (refuseProxyCompletion && isProxyCompletionPath(context.path)) {
+          throw new APIError("NOT_FOUND", { message: "Not found" });
+        }
+        // A preview without the Google client secret must not attempt a code exchange or token
+        // refresh: production does the exchange, and the placeholder must never reach Google.
+        if (refuseGoogleTokenCalls && isGoogleTokenCallPath(context.path)) {
           throw new APIError("NOT_FOUND", { message: "Not found" });
         }
       }),

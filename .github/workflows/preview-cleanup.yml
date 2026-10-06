@@ -10,8 +10,10 @@ on:
 permissions:
   contents: read
 
+# Same group as the preview job in ci.yml (`preview-<PR number>`), so cleanup queues behind a
+# preview that is still creating its Neon branch instead of finding nothing and leaving it behind.
 concurrency:
-  group: preview-cleanup-${{ github.event.pull_request.number }}
+  group: preview-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:

@@ -105,6 +105,25 @@ test("/healthz still answers 200 with its version while the database is down", a
   expect(await response.json()).toEqual({ status: "ok", version });
 });
 
+// Control (M1): a ConfigError produces the same 503 as a database failure, so the 503 tests above
+// could pass against a server with broken configuration. These only pass when getConfig()
+// succeeded: the Origin check runs after it, and a cookie-less session lookup needs no database.
+test("control: the server's configuration is valid (a foreign Origin gets 403, not 503)", async () => {
+  const response = await fetch(`${ORIGIN_OF_SERVER(port)}/sign-out`, {
+    method: "POST",
+    headers: { cookie: sessionCookie, origin: "http://evil.example" },
+    redirect: "manual",
+  });
+  expect(response.status).toBe(403);
+  expect(response.headers.getSetCookie()).toEqual([]);
+});
+
+test("control: a request with no session cookie is answered 'signed out' without the database", async () => {
+  const response = await fetch(`${ORIGIN_OF_SERVER(port)}/api/auth/get-session`);
+  expect(response.status).toBe(200);
+  expect(await response.json()).toBeNull();
+});
+
 test("sign-out fails closed (503, no redirect, no cookie cleared as if it worked)", async () => {
   const response = await fetch(`${ORIGIN_OF_SERVER(port)}/sign-out`, {
     method: "POST",

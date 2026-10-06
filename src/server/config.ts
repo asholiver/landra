@@ -15,6 +15,35 @@ const PLACEHOLDER_SECRET_FRAGMENTS = [
 ];
 const MINIMUM_DISTINCT_SECRET_CHARACTERS = 16;
 
+function originOf(value: string | undefined): string | undefined {
+  try {
+    return value === undefined ? undefined : new URL(value).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A proxy preview forwards Google sign-in to the production deployment, which alone holds the
+ * Google client secret and performs the code exchange (ADR-0002). It is recognised by: the proxy
+ * secret and a production URL are set, that URL's origin differs from this deployment's own, and
+ * the platform does not say this is the production deployment.
+ */
+function isProxyPreview(env: {
+  OAUTH_PROXY_SECRET?: string;
+  OAUTH_PROXY_PRODUCTION_URL?: string;
+  BETTER_AUTH_URL: string;
+  VERCEL_ENV?: string;
+}): boolean {
+  const productionOrigin = originOf(env.OAUTH_PROXY_PRODUCTION_URL);
+  return (
+    env.OAUTH_PROXY_SECRET !== undefined &&
+    productionOrigin !== undefined &&
+    productionOrigin !== originOf(env.BETTER_AUTH_URL) &&
+    env.VERCEL_ENV !== "production"
+  );
+}
+
 /** Rejects obviously weak or placeholder secrets (the real ones come from `openssl rand`). */
 function isWeakSecret(secret: string): boolean {
   const lowered = secret.toLowerCase();
@@ -44,10 +73,27 @@ const environmentSchema = z
   .superRefine((env, context) => {
     const hasId = env.GOOGLE_CLIENT_ID !== undefined;
     const hasSecret = env.GOOGLE_CLIENT_SECRET !== undefined;
-    if (hasId !== hasSecret) {
+    // F3: only a proxy preview may hold the client ID alone. Every other deployment needs both.
+    const secretOptional = isProxyPreview(env);
+    if (hasSecret && !hasId) {
       context.addIssue({
         code: "custom",
-        path: [hasId ? "GOOGLE_CLIENT_SECRET" : "GOOGLE_CLIENT_ID"],
+        path: ["GOOGLE_CLIENT_ID"],
+        message: "must be set together with the other Google credential",
+      });
+    }
+    // F3R-L1: a proxy preview must never be handed the production Google client secret.
+    if (hasSecret && secretOptional) {
+      context.addIssue({
+        code: "custom",
+        path: ["GOOGLE_CLIENT_SECRET"],
+        message: "must not be set on a proxy preview (production performs the code exchange)",
+      });
+    }
+    if (hasId && !hasSecret && !secretOptional) {
+      context.addIssue({
+        code: "custom",
+        path: ["GOOGLE_CLIENT_SECRET"],
         message: "must be set together with the other Google credential",
       });
     }
@@ -78,7 +124,7 @@ const environmentSchema = z
     }
     if (env.NODE_ENV === "production") {
       for (const name of ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"] as const) {
-        if (env[name] === undefined) {
+        if (env[name] === undefined && !(name === "GOOGLE_CLIENT_SECRET" && secretOptional)) {
           context.addIssue({ code: "custom", path: [name], message: "is required in production" });
         }
       }
@@ -95,7 +141,11 @@ export type AppConfig = {
   databaseUrlUnpooled: string;
   authSecret: string;
   authBaseUrl: string;
-  google: { clientId: string; clientSecret: string } | null;
+  /**
+   * `clientSecret` is null only on a proxy preview (see isProxyPreview): production performs the
+   * code exchange there, so the preview never holds the Google client secret.
+   */
+  google: { clientId: string; clientSecret: string | null } | null;
   oauthProxy: { secret: string; productionUrl: string } | null;
   version: string;
 };
@@ -128,10 +178,9 @@ export function loadConfig(env: Record<string, string | undefined>): AppConfig {
     databaseUrlUnpooled: parsed.DATABASE_URL_UNPOOLED ?? parsed.DATABASE_URL,
     authSecret: parsed.BETTER_AUTH_SECRET,
     authBaseUrl: parsed.BETTER_AUTH_URL,
-    google:
-      parsed.GOOGLE_CLIENT_ID && parsed.GOOGLE_CLIENT_SECRET
-        ? { clientId: parsed.GOOGLE_CLIENT_ID, clientSecret: parsed.GOOGLE_CLIENT_SECRET }
-        : null,
+    google: parsed.GOOGLE_CLIENT_ID
+      ? { clientId: parsed.GOOGLE_CLIENT_ID, clientSecret: parsed.GOOGLE_CLIENT_SECRET ?? null }
+      : null,
     oauthProxy: parsed.OAUTH_PROXY_SECRET
       ? {
           secret: parsed.OAUTH_PROXY_SECRET,

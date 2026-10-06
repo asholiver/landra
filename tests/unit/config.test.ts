@@ -69,6 +69,104 @@ describe("loadConfig", () => {
     expect(message).toContain("GOOGLE_CLIENT_SECRET");
   });
 
+  describe("Google client secret on proxy previews (F3)", () => {
+    const proxyPreviewEnvironment = {
+      ...productionEnvironment,
+      BETTER_AUTH_URL: "https://preview-pr-1.vercel.app",
+      OAUTH_PROXY_SECRET: OTHER_STRONG_SECRET,
+      OAUTH_PROXY_PRODUCTION_URL: "https://app.example.com",
+      VERCEL_ENV: "preview",
+      GOOGLE_CLIENT_SECRET: undefined,
+    };
+
+    it("accepts the client ID alone on a proxy preview, with no secret held", () => {
+      expect(loadConfig(proxyPreviewEnvironment).google).toEqual({
+        clientId: "client-id",
+        clientSecret: null,
+      });
+    });
+
+    it("rejects a Google client secret on a proxy preview, naming it but never its value", () => {
+      const message = messageFor({
+        ...proxyPreviewEnvironment,
+        GOOGLE_CLIENT_SECRET: "super-secret-value",
+      });
+      expect(message).toContain("GOOGLE_CLIENT_SECRET");
+      expect(message).not.toContain("super-secret-value");
+    });
+
+    it("does not affect local development: both credentials are accepted outside a proxy preview", () => {
+      const config = loadConfig({
+        ...validEnvironment,
+        GOOGLE_CLIENT_ID: "client-id",
+        GOOGLE_CLIENT_SECRET: "client-secret",
+      });
+      expect(config.google).toEqual({ clientId: "client-id", clientSecret: "client-secret" });
+    });
+
+    it("still requires the client ID on a proxy preview in production mode", () => {
+      expect(messageFor({ ...proxyPreviewEnvironment, GOOGLE_CLIENT_ID: undefined })).toContain(
+        "GOOGLE_CLIENT_ID",
+      );
+    });
+
+    it("rejects a secret without an ID on a proxy preview", () => {
+      const message = messageFor({
+        ...proxyPreviewEnvironment,
+        GOOGLE_CLIENT_ID: undefined,
+        GOOGLE_CLIENT_SECRET: "client-secret",
+      });
+      expect(message).toContain("GOOGLE_CLIENT_ID");
+    });
+
+    it("rejects the client ID alone when VERCEL_ENV is production", () => {
+      expect(messageFor({ ...proxyPreviewEnvironment, VERCEL_ENV: "production" })).toContain(
+        "GOOGLE_CLIENT_SECRET",
+      );
+    });
+
+    it("rejects the client ID alone on the production deployment itself", () => {
+      const message = messageFor({
+        ...productionEnvironment,
+        GOOGLE_CLIENT_SECRET: undefined,
+        OAUTH_PROXY_SECRET: OTHER_STRONG_SECRET,
+        OAUTH_PROXY_PRODUCTION_URL: "https://app.example.com",
+      });
+      expect(message).toContain("GOOGLE_CLIENT_SECRET");
+    });
+
+    it("rejects the client ID alone when the proxy production URL has the same origin", () => {
+      const message = messageFor({
+        ...proxyPreviewEnvironment,
+        BETTER_AUTH_URL: "https://app.example.com",
+        OAUTH_PROXY_PRODUCTION_URL: "https://app.example.com/",
+      });
+      expect(message).toContain("GOOGLE_CLIENT_SECRET");
+    });
+
+    it("rejects the client ID alone on a non-proxy deployment, in production and outside it", () => {
+      const withoutProxy = {
+        ...proxyPreviewEnvironment,
+        OAUTH_PROXY_SECRET: undefined,
+        OAUTH_PROXY_PRODUCTION_URL: undefined,
+      };
+      expect(messageFor(withoutProxy)).toContain("GOOGLE_CLIENT_SECRET");
+      expect(
+        messageFor({
+          ...validEnvironment,
+          GOOGLE_CLIENT_ID: "only-id",
+          OAUTH_PROXY_PRODUCTION_URL: "https://app.example.com",
+        }),
+      ).toContain("GOOGLE_CLIENT_SECRET");
+    });
+
+    it("rejects the client ID alone when a production URL is set without the proxy secret", () => {
+      expect(messageFor({ ...proxyPreviewEnvironment, OAUTH_PROXY_SECRET: undefined })).toContain(
+        "GOOGLE_CLIENT_SECRET",
+      );
+    });
+  });
+
   it("treats empty strings as unset", () => {
     const config = loadConfig({
       ...validEnvironment,

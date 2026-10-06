@@ -138,7 +138,6 @@ jobs:
           PREVIEW_BETTER_AUTH_SECRET: ${{ secrets.PREVIEW_BETTER_AUTH_SECRET }}
           PREVIEW_OAUTH_PROXY_SECRET: ${{ secrets.PREVIEW_OAUTH_PROXY_SECRET }}
           PREVIEW_GOOGLE_CLIENT_ID: ${{ secrets.PREVIEW_GOOGLE_CLIENT_ID }}
-          PREVIEW_GOOGLE_CLIENT_SECRET: ${{ secrets.PREVIEW_GOOGLE_CLIENT_SECRET }}
           PREVIEW_OAUTH_PROXY_PRODUCTION_URL: ${{ vars.PREVIEW_OAUTH_PROXY_PRODUCTION_URL }}
           PREVIEW_ALIAS_PREFIX: ${{ vars.PREVIEW_ALIAS_PREFIX }}
         run: |
@@ -146,7 +145,7 @@ jobs:
           missing=()
           for name in PREVIEW_VERCEL_TOKEN PREVIEW_VERCEL_ORG_ID PREVIEW_VERCEL_PROJECT_ID \
             PREVIEW_NEON_API_KEY PREVIEW_NEON_PROJECT_ID PREVIEW_BETTER_AUTH_SECRET \
-            PREVIEW_OAUTH_PROXY_SECRET PREVIEW_GOOGLE_CLIENT_ID PREVIEW_GOOGLE_CLIENT_SECRET \
+            PREVIEW_OAUTH_PROXY_SECRET PREVIEW_GOOGLE_CLIENT_ID \
             PREVIEW_OAUTH_PROXY_PRODUCTION_URL PREVIEW_ALIAS_PREFIX; do
             if [ -z "${!name:-}" ]; then
               missing+=("$name")
@@ -275,7 +274,6 @@ jobs:
           OAUTH_PROXY_SECRET: ${{ secrets.PREVIEW_OAUTH_PROXY_SECRET }}
           OAUTH_PROXY_PRODUCTION_URL: ${{ vars.PREVIEW_OAUTH_PROXY_PRODUCTION_URL }}
           GOOGLE_CLIENT_ID: ${{ secrets.PREVIEW_GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.PREVIEW_GOOGLE_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           if ! [[ "$ALIAS_PREFIX" =~ ^[a-z0-9][a-z0-9-]{2,40}$ ]]; then
@@ -291,7 +289,6 @@ jobs:
             --env "OAUTH_PROXY_SECRET=$OAUTH_PROXY_SECRET" \
             --env "OAUTH_PROXY_PRODUCTION_URL=$OAUTH_PROXY_PRODUCTION_URL" \
             --env "GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID" \
-            --env "GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET" \
             --env "GIT_SHA=$HEAD_SHA")"
           pnpm exec vercel alias set "$deployment_url" "$alias_host" --token "$VERCEL_TOKEN"
           echo "preview_url=https://${alias_host}" >> "$GITHUB_OUTPUT"
