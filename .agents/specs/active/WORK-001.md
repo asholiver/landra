@@ -555,4 +555,24 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
   - Security review: no BLOCKER; ready for Stage 1 subject to the GitHub settings. F1 (HIGH) blocks Stage 2.
   - Details are under "Prove results" in Implementation state; the remediation is in progress.
 - **External review:** not configured (`externalReview: null`). The independent `/ai-engineering:review` hasn't run yet.
-- **Not verifiable locally (Stage 1/2/3):** AC3 on GitHub, AC4, AC5, AC6 on production, AC7, AC9, R14–R17 on the platforms, and the Stage 2 verification items.
+- **Not verifiable locally (Stage 2/3):** AC4, AC5, AC6 on production, AC7, AC9, R14–R17 on the platforms, and the Stage 2 verification items.
+- **Prove remediation** (`312665c`, `a159f20`): committed `full` gate PASSED. `312665c` hasn't been independently security-reviewed yet; that review is due before Stage 2.
+- **Stage 1 complete** (2026-10-06):
+  - The owner applied the GitHub settings: ruleset, merge commits only, Actions restrictions, no write collaborators, secret scanning with push protection, Dependabot security updates.
+  - Push approved by the owner ("approve push"): `work/WORK-001-f0-foundation` pushed at `a159f20`; `main` unchanged at `fd71610`.
+  - Draft PR #1 (https://github.com/asholiver/landra/pull/1).
+  - **First GitHub CI run** (#37436826169) on `a159f20`: **success.**
+    - Quality gate success. The full gate passed on Linux, including the Docker gitleaks full-history scan, the Vercel CLI from the lockfile, `smoke:node`, E2E with axe, and Lighthouse. **AC3 now PASSES on GitHub.**
+    - Preview configuration check success. Preview deployment, preview comment, production configuration check and production deployment all skipped, as designed.
+    - Job-summary text was not readable without authentication.
+  - **`main` ruleset, verified via the public rules API:**
+    - deletion and force pushes blocked;
+    - PR required, merge commits only, review threads resolved;
+    - required status check `Quality gate (full gate incl. Node smoke and secret scan)` bound to GitHub Actions (integration 15368), with "up to date before merging" on.
+  - **Not authorised:** merging, Stage 2 resources, secrets, deployment.
+  - **Open before Stage 2:**
+    - the F3 investigation;
+    - a security review of `312665c`;
+    - the separate Vercel team or account (F1);
+    - Stage 2 verification items.
+    - Also verify in CI: how concurrency behaves while production awaits approval.
