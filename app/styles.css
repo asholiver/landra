@@ -1,0 +1,199 @@
+/* Placeholder styling only: visual design belongs to F15. Contrast, focus and layout are kept
+   accessible. No inline styles anywhere: the CSP allows stylesheets from this origin only. */
+
+:root {
+  color-scheme: light dark;
+  --background: #ffffff;
+  --surface: #f4f5f7;
+  --text: #16181d;
+  --text-muted: #4a4f5a;
+  --border: #c9ccd3;
+  --accent: #1a4fd6;
+  --accent-text: #ffffff;
+  --danger-background: #fdeceb;
+  --danger-text: #8a1c14;
+  --focus: #1a4fd6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #14161a;
+    --surface: #1e2127;
+    --text: #f1f2f4;
+    --text-muted: #b6bac3;
+    --border: #3a3f49;
+    --accent: #7ba3ff;
+    --accent-text: #0b1020;
+    --danger-background: #3a1714;
+    --danger-text: #ffc9c4;
+    --focus: #9db9ff;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: 1rem;
+  top: -4rem;
+  padding: 0.5rem 1rem;
+  background: var(--background);
+  color: var(--text);
+  border: 2px solid var(--focus);
+  z-index: 10;
+}
+
+.skip-link:focus {
+  top: 1rem;
+}
+
+.container {
+  width: 100%;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.site-header {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.site-header-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+
+.brand {
+  color: var(--text);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.page {
+  padding-top: 2rem;
+  padding-bottom: 3rem;
+}
+
+h1 {
+  margin: 0 0 0.75rem;
+  font-size: 2rem;
+  line-height: 1.2;
+}
+
+.lead {
+  font-size: 1.125rem;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.button {
+  display: inline-block;
+  padding: 0.625rem 1.25rem;
+  border: 2px solid var(--accent);
+  border-radius: 0.375rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.button-secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+.alert {
+  margin: 0 0 1rem;
+  padding: 0.75rem 1rem;
+  border-radius: 0.375rem;
+}
+
+.alert[hidden] {
+  display: none;
+}
+
+.alert-error {
+  background: var(--danger-background);
+  color: var(--danger-text);
+}
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.account form {
+  margin: 0;
+}
+
+.avatar {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.avatar-initials {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.empty-state {
+  margin-top: 1.5rem;
+  padding: 2rem 1rem;
+  border: 1px dashed var(--border);
+  border-radius: 0.5rem;
+  text-align: center;
+}
+
+.empty-state h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.25rem;
+}
+
+.empty-state p {
+  margin: 0;
+  color: var(--text-muted);
+}

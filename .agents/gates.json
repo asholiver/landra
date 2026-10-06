@@ -1,5 +1,5 @@
 {
-  "fast": "echo 'fast gate not configured yet: set it in .agents/gates.json once the stack is chosen' >&2; exit 1",
-  "full": "echo 'full gate not configured yet: set it in .agents/gates.json once the stack is chosen' >&2; exit 1",
+  "fast": "pnpm lint && pnpm typecheck && pnpm test",
+  "full": "pnpm lint && pnpm typecheck && pnpm test && TEST_DATABASE_URL=postgresql://app:app@127.0.0.1:5434/postgres pnpm test:integration && pnpm build && pnpm build:vercel && pnpm smoke:node && TEST_DATABASE_URL=postgresql://app:app@127.0.0.1:5434/postgres pnpm test:e2e && pnpm lighthouse && pnpm audit --prod --audit-level high && pnpm scan:secrets",
   "externalReview": null
 }

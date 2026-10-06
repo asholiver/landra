@@ -1,0 +1,44 @@
+import { redirect } from "react-router";
+import { buildTrustedOrigins } from "../../src/server/auth/auth";
+import { isTrustedOrigin } from "../../src/server/auth/origin";
+import { getConfig } from "../../src/server/config";
+import { getAuth, logger } from "../../src/server/runtime";
+import type { Route } from "./+types/sign-out";
+
+// POST only (the form in the app shell). Invalidates the server session, clears the cookie
+// (R6) and returns to the home page.
+export async function action({ request }: Route.ActionArgs) {
+  try {
+    // Inside the try so invalid configuration fails the same closed way as a database failure
+    // (503), rather than an unexplained 500.
+    const config = getConfig();
+    if (!isTrustedOrigin(request.headers, buildTrustedOrigins(config))) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    // Better Auth's signOut only logs a failed session delete and still clears the cookie, which
+    // would leave the server session alive while the user believes they signed out. So the
+    // deletion is done here first, by the token of the session Better Auth has just verified
+    // (signed cookie), and it THROWS on any failure: an unreachable database (the read throws)
+    // and a database that accepts reads but rejects writes both end in 503 with the cookie
+    // untouched. Deleting by that token, rather than re-reading, leaves no read-then-delete race.
+    // signOut afterwards only clears the cookies; its own delete finds nothing left to remove.
+    const current = await getAuth().api.getSession({ headers: request.headers });
+    if (current) {
+      await (await getAuth().$context).internalAdapter.deleteSession(current.session.token);
+    }
+    const { headers } = await getAuth().api.signOut({
+      headers: request.headers,
+      returnHeaders: true,
+    });
+    return redirect("/", { headers });
+  } catch (error) {
+    logger.error("sign-out failed", {
+      error: error instanceof Error ? error : new Error("unknown error"),
+    });
+    // Fixed text, no internals. The cookie is left untouched: sign-out did not happen.
+    return new Response("Sign-out is temporarily unavailable. Please try again.", {
+      status: 503,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+    });
+  }
+}

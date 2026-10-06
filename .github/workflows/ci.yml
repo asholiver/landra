@@ -1,0 +1,531 @@
+name: CI
+
+# Stage 1 (no secrets): quality gates and the secret scan run on every PR and on main.
+# Stage 2 (preview) and Stage 3 (production) jobs are SKIPPED, never "passed", until the owner has
+# configured them. See README "CI/CD". Triggers are pull_request (never pull_request_target):
+# PRs from forks get no secrets and no preview.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Concurrency is set per job, not for the whole workflow, so a production job waiting for the
+# owner's approval cannot hold back the CI of later pushes to main:
+#  - quality: a newer push to the same PR cancels the superseded run; every push to main gets its
+#    own group (keyed by commit), so a run on main is never cancelled by another push.
+#  - preview: one deployment per PR at a time, never cancelled midway (a newer one replaces a
+#    queued older one).
+#  - production: deployments are serialised and never cancelled midway.
+
+jobs:
+  # Never uses repository or production secrets.
+  quality:
+    name: Quality gate (full gate incl. Node smoke and secret scan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    concurrency:
+      group: quality-${{ github.event.pull_request.number || github.sha }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      # Full history: the gate's secret scan (gitleaks) reads every commit.
+      - name: Check out full history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node (version from .nvmrc)
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable Corepack (pnpm version from package.json)
+        run: |
+          set -euo pipefail
+          corepack enable
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+
+      # Same image (pinned by digest) as docker-compose.yml's postgres-test. A service container
+      # cannot pass the `-c app.disposable_test_server=on` flag the test safeguards require, so it
+      # is started with `docker run`. Throwaway credentials, loopback only, data in tmpfs.
+      - name: Start disposable test Postgres
+        run: |
+          set -euo pipefail
+          docker run --detach --name postgres-test \
+            --publish 127.0.0.1:5434:5432 \
+            --tmpfs /var/lib/postgresql \
+            --env POSTGRES_USER=app \
+            --env POSTGRES_PASSWORD=app \
+            --env POSTGRES_DB=postgres \
+            postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15 \
+            postgres -c app.disposable_test_server=on
+
+      - name: Wait for Postgres to accept connections
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            if docker exec postgres-test pg_isready --username app --dbname postgres; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Postgres did not become ready in time" >&2
+          docker logs postgres-test >&2
+          exit 1
+
+      - name: Install Playwright Chromium
+        run: |
+          set -euo pipefail
+          pnpm exec playwright install --with-deps chromium
+
+      # The command text lives only in .agents/gates.json; it is read here, never duplicated.
+      - name: Full gate (command read from .agents/gates.json)
+        run: |
+          set -euo pipefail
+          gate="$(jq -r .full .agents/gates.json)"
+          if [ -z "$gate" ] || [ "$gate" = "null" ]; then
+            echo "No full gate command found in .agents/gates.json" >&2
+            exit 1
+          fi
+          bash -euo pipefail -c "$gate"
+
+      # Informational only: the full audit (all dependencies, including dev tooling) is written to
+      # the job summary. It never affects the gate or the job result (the gate's own
+      # `pnpm audit --prod --audit-level high` is what blocks).
+      - name: Full dependency audit (informational, non-blocking)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          {
+            echo "### Full dependency audit (informational, non-blocking)"
+            echo
+            echo '```'
+            pnpm audit --json | jq -r '.metadata.vulnerabilities | to_entries | map("\(.key): \(.value)") | join(", ")'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------------------------
+  # Stage 2: preview environments (PRs from this repository only)
+  # ---------------------------------------------------------------------------------------------
+  preview-config:
+    name: Preview configuration check
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check that every required preview secret and variable exists
+        id: check
+        env:
+          PREVIEW_VERCEL_TOKEN: ${{ secrets.PREVIEW_VERCEL_TOKEN }}
+          PREVIEW_VERCEL_ORG_ID: ${{ secrets.PREVIEW_VERCEL_ORG_ID }}
+          PREVIEW_VERCEL_PROJECT_ID: ${{ secrets.PREVIEW_VERCEL_PROJECT_ID }}
+          PREVIEW_NEON_API_KEY: ${{ secrets.PREVIEW_NEON_API_KEY }}
+          PREVIEW_NEON_PROJECT_ID: ${{ secrets.PREVIEW_NEON_PROJECT_ID }}
+          PREVIEW_BETTER_AUTH_SECRET: ${{ secrets.PREVIEW_BETTER_AUTH_SECRET }}
+          PREVIEW_OAUTH_PROXY_SECRET: ${{ secrets.PREVIEW_OAUTH_PROXY_SECRET }}
+          PREVIEW_GOOGLE_CLIENT_ID: ${{ secrets.PREVIEW_GOOGLE_CLIENT_ID }}
+          PREVIEW_OAUTH_PROXY_PRODUCTION_URL: ${{ vars.PREVIEW_OAUTH_PROXY_PRODUCTION_URL }}
+          PREVIEW_ALIAS_PREFIX: ${{ vars.PREVIEW_ALIAS_PREFIX }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in PREVIEW_VERCEL_TOKEN PREVIEW_VERCEL_ORG_ID PREVIEW_VERCEL_PROJECT_ID \
+            PREVIEW_NEON_API_KEY PREVIEW_NEON_PROJECT_ID PREVIEW_BETTER_AUTH_SECRET \
+            PREVIEW_OAUTH_PROXY_SECRET PREVIEW_GOOGLE_CLIENT_ID \
+            PREVIEW_OAUTH_PROXY_PRODUCTION_URL PREVIEW_ALIAS_PREFIX; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Preview environment is configured." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Preview environment not configured — skipped (Stage 2)"
+              echo
+              echo "Missing secrets or variables (names only): ${missing[*]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  preview:
+    name: Preview deployment
+    needs: [quality, preview-config]
+    if: >-
+      needs.preview-config.outputs.configured == 'true' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read # check that the PR is still open before provisioning anything
+    # Cleanup (preview-cleanup.yml) uses the same group, so a PR closed while this job was queued
+    # is seen as closed by the check below and gets nothing provisioned.
+    concurrency:
+      group: preview-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    outputs:
+      preview_url: ${{ steps.deploy.outputs.preview_url }}
+      open: ${{ steps.pr.outputs.open }}
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      # Fails closed: if the API call fails, the job fails and nothing is provisioned.
+      - name: Verify the PR is still open
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Unexpected pull request number format" >&2
+            exit 1
+          fi
+          state="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq .state)"
+          if [ "$state" = "open" ]; then
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+            echo "PR #${PR_NUMBER} is closed — preview skipped" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check out
+        if: steps.pr.outputs.open == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (version from .nvmrc)
+        if: steps.pr.outputs.open == 'true'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable Corepack
+        if: steps.pr.outputs.open == 'true'
+        run: |
+          set -euo pipefail
+          corepack enable
+
+      - name: Install dependencies
+        if: steps.pr.outputs.open == 'true'
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+
+      - name: Compute branch name and expiry
+        id: names
+        if: steps.pr.outputs.open == 'true'
+        run: |
+          set -euo pipefail
+          echo "branch=preview/pr-${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          # Safety net: Neon removes the branch even if the PR-closed cleanup never runs.
+          echo "expires_at=$(date -u -d '+14 days' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # PREVIEW Neon project only (never production; ADR-0003). The branch is a child of that
+      # project's empty, migrated root.
+      - name: Create Neon preview branch
+        id: neon
+        if: steps.pr.outputs.open == 'true'
+        uses: neondatabase/create-branch-action@72ed4f69a12b6be9c16aebfad893f6a21e9aba8b # v6.4.0
+        with:
+          project_id: ${{ secrets.PREVIEW_NEON_PROJECT_ID }}
+          api_key: ${{ secrets.PREVIEW_NEON_API_KEY }}
+          branch_name: ${{ steps.names.outputs.branch }}
+          expires_at: ${{ steps.names.outputs.expires_at }}
+
+      - name: Mask derived database credentials
+        if: steps.pr.outputs.open == 'true'
+        env:
+          DB_URL: ${{ steps.neon.outputs.db_url }}
+          DB_URL_POOLED: ${{ steps.neon.outputs.db_url_pooled }}
+          DB_PASSWORD: ${{ steps.neon.outputs.password }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$DB_URL"
+          echo "::add-mask::$DB_URL_POOLED"
+          echo "::add-mask::$DB_PASSWORD"
+
+      - name: Apply migrations to the preview branch (direct connection)
+        if: steps.pr.outputs.open == 'true'
+        env:
+          DATABASE_URL_UNPOOLED: ${{ steps.neon.outputs.db_url }}
+        run: |
+          set -euo pipefail
+          pnpm db:migrate
+
+      - name: Pull Vercel project settings (preview)
+        if: steps.pr.outputs.open == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.PREVIEW_VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.PREVIEW_VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PREVIEW_VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          pnpm exec vercel pull --yes --environment=preview --token "$VERCEL_TOKEN"
+
+      # The build needs no secrets (prerendering does not read the app configuration).
+      - name: Build (Vercel preset)
+        if: steps.pr.outputs.open == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.PREVIEW_VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.PREVIEW_VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PREVIEW_VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          pnpm exec vercel build --token "$VERCEL_TOKEN"
+
+      # Only preview-scoped runtime configuration is passed. The alias gives a URL that is known
+      # before the deployment exists, which BETTER_AUTH_URL needs.
+      - name: Deploy prebuilt output and alias it
+        id: deploy
+        if: steps.pr.outputs.open == 'true'
+        env:
+          VERCEL_TOKEN: ${{ secrets.PREVIEW_VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.PREVIEW_VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.PREVIEW_VERCEL_PROJECT_ID }}
+          ALIAS_PREFIX: ${{ vars.PREVIEW_ALIAS_PREFIX }}
+          DATABASE_URL: ${{ steps.neon.outputs.db_url_pooled }}
+          DATABASE_URL_UNPOOLED: ${{ steps.neon.outputs.db_url }}
+          BETTER_AUTH_SECRET: ${{ secrets.PREVIEW_BETTER_AUTH_SECRET }}
+          OAUTH_PROXY_SECRET: ${{ secrets.PREVIEW_OAUTH_PROXY_SECRET }}
+          OAUTH_PROXY_PRODUCTION_URL: ${{ vars.PREVIEW_OAUTH_PROXY_PRODUCTION_URL }}
+          GOOGLE_CLIENT_ID: ${{ secrets.PREVIEW_GOOGLE_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$ALIAS_PREFIX" =~ ^[a-z0-9][a-z0-9-]{2,40}$ ]]; then
+            echo "PREVIEW_ALIAS_PREFIX must be 3-41 lowercase letters, digits or hyphens" >&2
+            exit 1
+          fi
+          alias_host="${ALIAS_PREFIX}-pr-${PR_NUMBER}.vercel.app"
+          deployment_url="$(pnpm exec vercel deploy --prebuilt --token "$VERCEL_TOKEN" \
+            --env "DATABASE_URL=$DATABASE_URL" \
+            --env "DATABASE_URL_UNPOOLED=$DATABASE_URL_UNPOOLED" \
+            --env "BETTER_AUTH_SECRET=$BETTER_AUTH_SECRET" \
+            --env "BETTER_AUTH_URL=https://${alias_host}" \
+            --env "OAUTH_PROXY_SECRET=$OAUTH_PROXY_SECRET" \
+            --env "OAUTH_PROXY_PRODUCTION_URL=$OAUTH_PROXY_PRODUCTION_URL" \
+            --env "GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID" \
+            --env "GIT_SHA=$HEAD_SHA")"
+          pnpm exec vercel alias set "$deployment_url" "$alias_host" --token "$VERCEL_TOKEN"
+          echo "preview_url=https://${alias_host}" >> "$GITHUB_OUTPUT"
+
+  # The only job with pull-requests: write. It holds no secrets and runs no PR code.
+  preview-comment:
+    name: Report preview URL on the PR
+    needs: preview
+    # Nothing was deployed when the PR had already closed.
+    if: needs.preview.outputs.open == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # create or update the single preview-URL comment on the PR
+    steps:
+      - name: Create or update the preview comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PREVIEW_URL: ${{ needs.preview.outputs.preview_url }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$PREVIEW_URL" =~ ^https://[a-z0-9-]+\.vercel\.app$ ]]; then
+            echo "Unexpected preview URL" >&2
+            exit 1
+          fi
+          marker="<!-- landra-preview -->"
+          body="${marker}
+          Preview deployed: ${PREVIEW_URL}
+          Commit: \`${HEAD_SHA}\`"
+          comment_id="$(gh api "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- landra-preview -->"))) | .id' \
+            | sed -n '1p')"
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH "repos/${REPOSITORY}/issues/comments/${comment_id}" -f body="$body" > /dev/null
+          else
+            gh api --method POST "repos/${REPOSITORY}/issues/${PR_NUMBER}/comments" -f body="$body" > /dev/null
+          fi
+
+  # ---------------------------------------------------------------------------------------------
+  # Stage 3: production (push to main, owner approval in the `production` environment)
+  # ---------------------------------------------------------------------------------------------
+  # Production secrets live only in the `production` environment, so a job outside it cannot see
+  # them. This job therefore reads one repository variable the owner sets at Stage 3.
+  production-config:
+    name: Production configuration check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check that production deployment is enabled
+        id: check
+        env:
+          PRODUCTION_DEPLOY_ENABLED: ${{ vars.PRODUCTION_DEPLOY_ENABLED }}
+        run: |
+          set -euo pipefail
+          if [ "$PRODUCTION_DEPLOY_ENABLED" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Production deployment is enabled; it still waits for owner approval." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Production not configured — skipped (Stage 3)"
+              echo
+              echo "Set the repository variable PRODUCTION_DEPLOY_ENABLED=true after creating the production environment."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  production:
+    name: Production deployment
+    needs: [quality, production-config]
+    if: >-
+      needs.production-config.outputs.enabled == 'true' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # The owner is the required reviewer. Nothing below runs until they approve.
+    environment: production
+    permissions:
+      contents: read
+    # Deployments are serialised and never cancelled midway.
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    env:
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+    steps:
+      - name: Verify production secrets are present (fails, never skips, once approved)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+          OAUTH_PROXY_SECRET: ${{ secrets.OAUTH_PROXY_SECRET }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID DATABASE_URL \
+            DATABASE_URL_UNPOOLED BETTER_AUTH_SECRET OAUTH_PROXY_SECRET GOOGLE_CLIENT_ID \
+            GOOGLE_CLIENT_SECRET PRODUCTION_URL; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing production configuration (names only): ${missing[*]}" >&2
+            exit 1
+          fi
+          if ! [[ "$PRODUCTION_URL" =~ ^https://[^/]+$ ]]; then
+            echo "PRODUCTION_URL must be an https origin with no path or trailing slash" >&2
+            exit 1
+          fi
+
+      - name: Check out
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (version from .nvmrc)
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable Corepack
+        run: |
+          set -euo pipefail
+          corepack enable
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile
+
+      # Migrations are backward-compatible (ADR-0003) and run before the deployment that needs them.
+      - name: Apply production migrations (direct connection)
+        env:
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+        run: |
+          set -euo pipefail
+          pnpm db:migrate
+
+      - name: Pull Vercel project settings (production)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          pnpm exec vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
+
+      - name: Build (Vercel preset, production)
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          pnpm exec vercel build --prod --token "$VERCEL_TOKEN"
+
+      - name: Deploy prebuilt output to production
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_URL_UNPOOLED }}
+          BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET }}
+          OAUTH_PROXY_SECRET: ${{ secrets.OAUTH_PROXY_SECRET }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          pnpm exec vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN" \
+            --env "DATABASE_URL=$DATABASE_URL" \
+            --env "DATABASE_URL_UNPOOLED=$DATABASE_URL_UNPOOLED" \
+            --env "BETTER_AUTH_SECRET=$BETTER_AUTH_SECRET" \
+            --env "BETTER_AUTH_URL=$PRODUCTION_URL" \
+            --env "OAUTH_PROXY_SECRET=$OAUTH_PROXY_SECRET" \
+            --env "GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID" \
+            --env "GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET" \
+            --env "GIT_SHA=$GITHUB_SHA" > /dev/null
+
+      - name: Post-deploy health check (must report the deployed commit)
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 12); do
+            body="$(curl --silent --show-error --fail --max-time 10 "${PRODUCTION_URL}/healthz" || true)"
+            version="$(printf '%s' "$body" | jq -r '.version // empty' 2>/dev/null || true)"
+            if [ "$version" = "$GITHUB_SHA" ]; then
+              echo "Production /healthz reports commit ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Production /healthz did not report commit ${GITHUB_SHA}" >&2
+          exit 1

@@ -3,16 +3,16 @@
 Keep this concise. Project-specific facts only: global engineering standards come from the ai-engineering plugin and are not copied here.
 
 ## Project
-Landra: an AI-powered job search workspace, built using agent-driven software development. Greenfield; the tech stack is not chosen yet.
+An AI-powered job-search copilot (product name not yet chosen; "landra" is only the repository's working name), built using agent-driven software development. Stack and architecture: see `.agents/project/architecture.md` and ADRs in `.agents/decisions/`. Roadmap: `.agents/project/roadmap.md` (feature IDs are permanent).
 
 ## Canonical commands
-Quality gates (`fast`, `full`, `externalReview`) are defined only in `.agents/gates.json` (currently placeholders that fail until the stack is chosen).
-- Test: TBD
-- Build: TBD
-- Lint/format: TBD
-- Security: TBD
-- E2E: TBD
-- Load/performance: TBD
+Quality gates (`fast`, `full`, `externalReview`) are defined only in `.agents/gates.json`; run the commands listed there (`externalReview` is not configured yet). Individual commands, with prerequisites, are in the README.
+- Test: `pnpm test` (unit); `pnpm test:integration` (needs the disposable test database)
+- Build: `pnpm build`; `pnpm build:vercel`; `pnpm smoke:node`
+- Lint/format: `pnpm lint` / `pnpm format` (Biome); `pnpm typecheck`
+- Security: `pnpm audit --prod --audit-level high`; `pnpm scan:secrets`
+- E2E: `pnpm test:e2e` (needs the disposable test database)
+- Load/performance: none yet; `pnpm lighthouse` covers page performance
 
 ## Architecture
 See `.agents/project/`.

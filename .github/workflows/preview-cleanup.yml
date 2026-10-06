@@ -1,0 +1,111 @@
+name: Preview cleanup
+
+# Deletes the PR's branch in the PREVIEW Neon project when the PR closes. Skipped while the
+# preview environment is not configured. pull_request (never pull_request_target): fork PRs get
+# no secrets and never created a branch.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+# Same group as the preview job in ci.yml (`preview-<PR number>`), so cleanup queues behind a
+# preview that is still creating its Neon branch instead of finding nothing and leaving it behind.
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup-config:
+    name: Cleanup configuration check
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check that the preview Neon secrets exist
+        id: check
+        env:
+          PREVIEW_NEON_API_KEY: ${{ secrets.PREVIEW_NEON_API_KEY }}
+          PREVIEW_NEON_PROJECT_ID: ${{ secrets.PREVIEW_NEON_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PREVIEW_NEON_API_KEY" ] && [ -n "$PREVIEW_NEON_PROJECT_ID" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "### Preview environment not configured — skipped (Stage 2)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # Calls Neon's documented REST API directly (no third-party action):
+  #   GET    /projects/{project_id}/branches?search=...   (find the branch id by exact name)
+  #   DELETE /projects/{project_id}/branches/{branch_id}  (200 deleted; 204 already gone)
+  # The key is sent in an Authorization header read from stdin, so it never appears in a command
+  # line or URL. A branch that does not exist counts as success (the cleanup is idempotent).
+  delete-preview-branch:
+    name: Delete preview Neon branch
+    needs: cleanup-config
+    if: >-
+      needs.cleanup-config.outputs.configured == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Delete the branch (PREVIEW project only)
+        env:
+          NEON_API_KEY: ${{ secrets.PREVIEW_NEON_API_KEY }}
+          NEON_PROJECT_ID: ${{ secrets.PREVIEW_NEON_PROJECT_ID }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          api="https://console.neon.tech/api/v2"
+          if ! [[ "$NEON_PROJECT_ID" =~ ^[A-Za-z0-9-]+$ ]] || ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Unexpected project id or pull request number format" >&2
+            exit 1
+          fi
+          branch_name="preview/pr-${PR_NUMBER}"
+          body_file="$(mktemp)"
+
+          # Prints the HTTP status code; the response body goes to $body_file. HTTP errors do not
+          # stop the script here: the caller decides what each status means.
+          request() {
+            printf 'header = "Authorization: Bearer %s"\n' "$NEON_API_KEY" \
+              | curl --config - --silent --show-error --fail-with-body \
+                --request "$1" --output "$body_file" --write-out '%{http_code}' "$2" || true
+          }
+
+          status="$(request GET "${api}/projects/${NEON_PROJECT_ID}/branches?search=preview%2Fpr-${PR_NUMBER}&limit=100")"
+          if [ "$status" != "200" ]; then
+            echo "Listing branches failed (HTTP ${status})" >&2
+            cat "$body_file" >&2
+            exit 1
+          fi
+          branch_id="$(jq -r --arg name "$branch_name" '[.branches[] | select(.name == $name)][0].id // empty' "$body_file")"
+          if [ -z "$branch_id" ]; then
+            echo "No branch named ${branch_name}: nothing to delete."
+            exit 0
+          fi
+          if [ "$(jq -r --arg name "$branch_name" '[.branches[] | select(.name == $name)][0].default // false' "$body_file")" = "true" ]; then
+            echo "Refusing to delete a default branch" >&2
+            exit 1
+          fi
+          if ! [[ "$branch_id" =~ ^br-[a-z0-9-]+$ ]]; then
+            echo "Unexpected branch id format" >&2
+            exit 1
+          fi
+
+          status="$(request DELETE "${api}/projects/${NEON_PROJECT_ID}/branches/${branch_id}")"
+          case "$status" in
+            200|204|404)
+              echo "Branch ${branch_name} deleted or already gone (HTTP ${status})."
+              ;;
+            *)
+              echo "Deleting the branch failed (HTTP ${status})" >&2
+              cat "$body_file" >&2
+              exit 1
+              ;;
+          esac
