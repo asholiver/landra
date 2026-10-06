@@ -88,6 +88,8 @@ Quality gates (`fast`, `full`) are defined only in `.agents/gates.json`; run the
 | 2. Preview | PRs from this repository, after Stage 1 passes | A branch in the separate **preview** Neon project, migrations on it, a Vercel preview deployed from prebuilt output with preview-only configuration, and the URL posted on the PR. Closing the PR deletes the branch | Preview secrets and variables below |
 | 3. Production | Push to `main`, after Stage 1 passes | Waits for the owner's manual approval in the GitHub `production` environment, then production migrations, the production deployment and a `/healthz` check that must report the deployed commit | Production environment below |
 
+A closed PR never gets a new preview: the preview job and the cleanup share one concurrency group per PR, and the preview job checks that the PR is still open (failing closed if it cannot tell) before creating anything. In a rare overlap (a cleanup queued behind a running preview is superseded by a later run's preview job) a Neon preview branch can be left behind; it expires on its own after 14 days.
+
 Vercel's own Git auto-deploys are disabled (`vercel.json`), so deployments happen only through CI, after the gates.
 
 **Skipped, not passed.** Until the secrets exist, the preview jobs and the production job are skipped (shown as skipped in GitHub, with a step summary saying why). A merge to `main` never changes production by itself: the production job always waits for approval.

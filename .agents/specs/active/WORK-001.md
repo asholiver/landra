@@ -617,7 +617,28 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
       - **Remaining LOW (follow-up before Stage 2):** a PR closed while CI is still in `quality` can still get a preview branch and deployment, because the preview job joins `preview-<N>` only after `quality`. Proposed fix: the preview job's first step checks that the PR is still `open` (`pull-requests: read`) and skips otherwise. Bounded by the 14-day branch expiry.
       - INFO: assert that `deleteSession` was called with the seeded token.
       - UNVERIFIED by the reviewer: re-running the guard-disabled proof; live cross-workflow concurrency.
-    - Optional Stage 2 check: fail CI if the preview Vercel project's env contains `GOOGLE_CLIENT_SECRET`. If a `PREVIEW_GOOGLE_CLIENT_SECRET` repository secret is ever created, delete it.
+    - Optional Stage 2 check: fail CI if the preview Vercel project's env contains `GOOGLE_CLIENT_SECRET`.
+    - **Committed** as `f006ff4`. The first committed gate run **FAILED**: gitleaks flagged a new hard-coded proxy-secret test fixture in `auth-endpoints.test.ts`.
+      - Cause: the secret scan reads committed history only, so the passing working-tree gate couldn't see it.
+      - Fix: the fixture is generated at runtime, and the *unpushed* commit was amended (`656f1d8` → `f006ff4`), so the literal never entered history and `.gitleaksignore` stays at the 11 approved fingerprints.
+      - Committed `full` gate then PASSED (18 commits scanned, no leaks).
+- **Owner decisions before Stage 2** (Ashley Oliver, 2026-10-06):
+  - **L3:** the F0 policy stays as documented: the 7-day cooldown applies to the direct `vercel` dependency. No whole-lockfile `minimumReleaseAge` during WORK-001. Whole-lockfile dependency-age policy is a post-F0 review candidate.
+  - **Closed-PR preview race:** fix before Stage 2. Immediately before preview provisioning, verify the PR is still open and skip safely if it isn't. Permission limited to `pull-requests: read`. Reviewed, gated, committed locally, not pushed.
+    - **Implemented** (platform agent):
+      - The first `preview` step checks the PR state through the GitHub API.
+      - `REPOSITORY` and `PR_NUMBER` are passed via env, and the PR number is digit-validated.
+      - `open` provisions; any other state gives a summary line and every later step plus `preview-comment` skipped, with a green run.
+      - An API failure fails the job (fail closed).
+      - `pull-requests: read` is added on `preview` only.
+      - actionlint clean; zizmor default persona (offline) no findings.
+    - **Fourth independent review:** OK to commit; no BLOCKER, HIGH or MEDIUM.
+      - The `set -e` assignment really fails the step.
+      - All 11 later steps and `preview-comment` are gated; no secret-using step runs for a closed PR.
+      - The required Quality gate is unaffected.
+      - Both orderings are closed.
+      - **Residual LOW:** if a later run's preview job joins the group while a cleanup is pending behind a running preview, GitHub cancels the pending cleanup, and the branch is orphaned until its 14-day expiry. Recommended: accept and document (README updated). Alternatives (a cleanup step inside the preview job, which would use secrets for a closed PR, or a scheduled sweep) are post-F0 options.
+      - UNVERIFIED: live GitHub cross-workflow pending-cancel behaviour; `gh` on the runner (preinstalled on GitHub-hosted runners). If a `PREVIEW_GOOGLE_CLIENT_SECRET` repository secret is ever created, delete it.
 - **Independent security review of `312665c`** (2026-10-06): **accepted before Stage 2; no BLOCKER or HIGH.**
   - **Verified:**
     - the sign-out Origin and CSRF behaviour is unchanged, with the cookie cache off;

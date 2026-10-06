@@ -174,37 +174,66 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      pull-requests: read # check that the PR is still open before provisioning anything
+    # Cleanup (preview-cleanup.yml) uses the same group, so a PR closed while this job was queued
+    # is seen as closed by the check below and gets nothing provisioned.
     concurrency:
       group: preview-${{ github.event.pull_request.number }}
       cancel-in-progress: false
     outputs:
       preview_url: ${{ steps.deploy.outputs.preview_url }}
+      open: ${{ steps.pr.outputs.open }}
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
+      # Fails closed: if the API call fails, the job fails and nothing is provisioned.
+      - name: Verify the PR is still open
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Unexpected pull request number format" >&2
+            exit 1
+          fi
+          state="$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq .state)"
+          if [ "$state" = "open" ]; then
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "open=false" >> "$GITHUB_OUTPUT"
+            echo "PR #${PR_NUMBER} is closed — preview skipped" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Check out
+        if: steps.pr.outputs.open == 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
       - name: Set up Node (version from .nvmrc)
+        if: steps.pr.outputs.open == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version-file: .nvmrc
 
       - name: Enable Corepack
+        if: steps.pr.outputs.open == 'true'
         run: |
           set -euo pipefail
           corepack enable
 
       - name: Install dependencies
+        if: steps.pr.outputs.open == 'true'
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile
 
       - name: Compute branch name and expiry
         id: names
+        if: steps.pr.outputs.open == 'true'
         run: |
           set -euo pipefail
           echo "branch=preview/pr-${PR_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -215,6 +244,7 @@ jobs:
       # project's empty, migrated root.
       - name: Create Neon preview branch
         id: neon
+        if: steps.pr.outputs.open == 'true'
         uses: neondatabase/create-branch-action@72ed4f69a12b6be9c16aebfad893f6a21e9aba8b # v6.4.0
         with:
           project_id: ${{ secrets.PREVIEW_NEON_PROJECT_ID }}
@@ -223,6 +253,7 @@ jobs:
           expires_at: ${{ steps.names.outputs.expires_at }}
 
       - name: Mask derived database credentials
+        if: steps.pr.outputs.open == 'true'
         env:
           DB_URL: ${{ steps.neon.outputs.db_url }}
           DB_URL_POOLED: ${{ steps.neon.outputs.db_url_pooled }}
@@ -234,6 +265,7 @@ jobs:
           echo "::add-mask::$DB_PASSWORD"
 
       - name: Apply migrations to the preview branch (direct connection)
+        if: steps.pr.outputs.open == 'true'
         env:
           DATABASE_URL_UNPOOLED: ${{ steps.neon.outputs.db_url }}
         run: |
@@ -241,6 +273,7 @@ jobs:
           pnpm db:migrate
 
       - name: Pull Vercel project settings (preview)
+        if: steps.pr.outputs.open == 'true'
         env:
           VERCEL_TOKEN: ${{ secrets.PREVIEW_VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.PREVIEW_VERCEL_ORG_ID }}
@@ -251,6 +284,7 @@ jobs:
 
       # The build needs no secrets (prerendering does not read the app configuration).
       - name: Build (Vercel preset)
+        if: steps.pr.outputs.open == 'true'
         env:
           VERCEL_TOKEN: ${{ secrets.PREVIEW_VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.PREVIEW_VERCEL_ORG_ID }}
@@ -263,6 +297,7 @@ jobs:
       # before the deployment exists, which BETTER_AUTH_URL needs.
       - name: Deploy prebuilt output and alias it
         id: deploy
+        if: steps.pr.outputs.open == 'true'
         env:
           VERCEL_TOKEN: ${{ secrets.PREVIEW_VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.PREVIEW_VERCEL_ORG_ID }}
@@ -297,6 +332,8 @@ jobs:
   preview-comment:
     name: Report preview URL on the PR
     needs: preview
+    # Nothing was deployed when the PR had already closed.
+    if: needs.preview.outputs.open == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
