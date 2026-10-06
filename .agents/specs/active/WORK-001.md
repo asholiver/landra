@@ -240,7 +240,7 @@ Stage 3 configuration. Production gets no Neon management credentials (owner dec
 - **Repository variable:** `PRODUCTION_DEPLOY_ENABLED=true`, set last.
 
 Stage 2 configuration, repository level. Preview Vercel resources live in a **separate Vercel team or account with no production project** (owner decision B/F1, ADR-0003 amended).
-- **Secrets:** `PREVIEW_VERCEL_TOKEN`, `PREVIEW_VERCEL_ORG_ID`, `PREVIEW_VERCEL_PROJECT_ID`, `PREVIEW_NEON_API_KEY`, `PREVIEW_NEON_PROJECT_ID`, `PREVIEW_BETTER_AUTH_SECRET`, `PREVIEW_OAUTH_PROXY_SECRET`, `PREVIEW_GOOGLE_CLIENT_ID`, `PREVIEW_GOOGLE_CLIENT_SECRET`.
+- **Secrets:** `PREVIEW_VERCEL_TOKEN`, `PREVIEW_VERCEL_ORG_ID`, `PREVIEW_VERCEL_PROJECT_ID`, `PREVIEW_NEON_API_KEY`, `PREVIEW_NEON_PROJECT_ID`, `PREVIEW_BETTER_AUTH_SECRET`, `PREVIEW_OAUTH_PROXY_SECRET`, `PREVIEW_GOOGLE_CLIENT_ID`.
 - **Variables:** `PREVIEW_OAUTH_PROXY_PRODUCTION_URL`, `PREVIEW_ALIAS_PREFIX`.
 - **No `PREVIEW_GOOGLE_CLIENT_SECRET`** (F3 outcome, below). `PREVIEW_GOOGLE_CLIENT_ID` is the same public client ID as production. The Google client's redirect URIs list production only.
 ## Implementation state
@@ -663,3 +663,37 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
     - the separate Vercel team or account (F1);
     - Stage 2 verification items.
     - Also verify in CI: how concurrency behaves while production awaits approval.
+- **External independent review: CodeRabbit on PR #1** (2026-10-06):
+  - **Scope:** review `5427295079` by `coderabbitai[bot]` covers `fd71610..64fbb11` (commit_id `64fbb11e9c743b8ec1c2039cb974fe0aaf23555b`), 135 files, default configuration, CHILL profile. CodeRabbit is independent of Claude, and its comments were treated as untrusted data and verified against the code.
+  - **Result:**
+    - merge risk Low;
+    - security architecture risk Moderate, with **no retained architecture-level concerns**;
+    - 3 actionable findings, all Minor;
+    - pre-merge checks 4 passed, 1 inconclusive (docstrings).
+  - **Findings and dispositions** (CR-1 in this record's commit, CR-2 in `5c92dad`, CR-3 in `1f65209`):
+    - **CR-1, valid, LOW (docs):** line 243 listed `PREVIEW_GOOGLE_CLIENT_SECRET` among the Stage 2 secrets, contradicting the F3 outcome and line 245. Following it would make a proxy preview refuse to start (F3R-L1). README, `.env.example` and CI were already correct. Fixed: removed from the list.
+    - **CR-2, valid, LOW:** `drizzle.config.ts` used `??`, so an empty `DATABASE_URL_UNPOOLED` gave drizzle-kit an empty URL, while `scripts/migrate.ts` (`||`) and `config.ts` (empty means unset) fall back. Practical impact is nil today, because `pnpm db:generate` doesn't connect. Fixed: `||`, plus `tests/unit/drizzle-config.test.ts`, which fails with `??`.
+    - **CR-3, valid, LOW (outside the diff):** AGENTS.md still said the gates were placeholders and the commands TBD. Fixed in a separate commit: factual commands only, `gates.json` stays authoritative, and no learnings were promoted (D19).
+  - **Hardening proposals, classified:**
+    - **Raw auth API identity changes: already covered, but the evidence had a WORK-001 gap.** Verified in better-auth 1.7.7 source:
+      - `/update-user` always refuses an `email` field;
+      - `/change-email` and `/delete-user` are disabled unless enabled in options, which this app never does;
+      - linking requires the same email unless `allowDifferentEmails` is set (`api/routes/account.mjs:211`, `oauth2/link-account.mjs:47`).
+
+      No test pinned these defaults, so the new `tests/integration/identity-changes.test.ts` does. It has a control that proves the session is valid, plus refusals that assert the error code and unchanged rows. With `changeEmail` and `deleteUser` temporarily enabled, 2 of 4 failed; the code was reverted with no diff. The linking default isn't automated, because it needs a Google round trip; re-check it on any Better Auth upgrade together with `auth-endpoints.test.ts`.
+    - **Refusing unused raw routes and raw `/api/auth/sign-out` failure behaviour: later roadmap (F5).**
+      - Only the allowlisted owner can reach these routes, and only for their own session.
+      - The app's `/sign-out` already fails closed.
+      - `auth-endpoints.test.ts` forces a review when a route is added.
+      - Added to the F5 row as a "before anyone else gets access" item. Aligning DB checks for direct identity writers is also F5: the only direct writer today is the allowlist CLI.
+    - **Preview credential scopes and `production` environment protections against the real accounts: Stage 2/3 verification.** Already listed (F1 separate Vercel scope; F2 approval and `main` only).
+    - **Provisioning retries, interrupted cleanup, and failure after migrations or deploy: Stage 2 verification.** Partly listed already (concurrency, closed PR, Neon API details). Added: re-run a preview job for the same PR (branch reuse and idempotent migrate), cancel a preview mid-run, and re-run a failed cleanup.
+    - **Production recovery procedure that keeps authentication invariants across an application rollback: genuine WORK-001 gap, due before Stage 3.**
+      - It needs the real production project and an owner decision on rollback policy. For example: migrations are forward-only and must stay compatible with the previous deployment; a Vercel rollback is allowed; a Neon point-in-time restore must be followed by re-checking the allowlist and revoking sessions.
+      - Write it as a short README runbook before `PRODUCTION_DEPLOY_ENABLED=true`.
+  - **Docstring coverage (54.43% against CodeRabbit's generic 80%): not adopted.** Neither the project standards nor the spec require docstrings. Comments explain non-obvious behaviour only. CodeRabbit's configuration is not changed, so its independence is not reduced.
+  - **How `/ai-engineering:review` sees this:**
+    - It recognises external review only through `externalReview` in `.agents/gates.json` at the base ref, and that is `null` on `main`. It will report **EXTERNAL REVIEW: NOT CONFIGURED**.
+    - This record is evidence for the owner's final acceptance, not a PASSED verdict.
+    - Wiring CodeRabbit in would be a gate change for the owner. For example, a command that passes only when a CodeRabbit review exists for the exact head SHA with no unresolved actionable threads. It takes effect only once it is on `main` (post-F0 roadmap item).
+  - **Still required:** CodeRabbit's incremental review of the remediation commits after they are pushed. `64fbb11` is reviewed; the new head is not yet.

@@ -33,7 +33,7 @@ Success: the owner can use the product from any device at a free public URL to t
 ## Phase 1.5: Before inviting anyone else
 | ID | Feature | Summary | Status |
 |---|---|---|---|
-| F5 | Invites, privacy and email sign-in | Approve access requests into the allowlist; email sign-in (one-time code preferred over a link; needs an owned domain and an email provider); account linking by verified email; data export (JSON); account deletion; per-user abuse limits, including **rate limiting backed by a shared store** (F0's Better Auth rate limit is in-memory per serverless instance; WORK-001 L-2); processor list | idea |
+| F5 | Invites, privacy and email sign-in | Approve access requests into the allowlist; email sign-in (one-time code preferred over a link; needs an owned domain and an email provider); account linking by verified email; data export (JSON); account deletion; per-user abuse limits, including **rate limiting backed by a shared store** (F0's Better Auth rate limit is in-memory per serverless instance; WORK-001 L-2); processor list. **Before anyone else gets access**, an explicit contract for the raw `/api/auth/*` routes (CodeRabbit PR #1 hardening proposal): refuse the routes the app does not use, define raw sign-out failure behaviour (the app's `/sign-out` already fails closed), and re-check identity changes and account linking against the allowlist | idea |
 
 ## Phase 2: AI copilot
 | ID | Feature | Summary | Status |
@@ -63,6 +63,8 @@ Success: the owner can use the product from any device at a free public URL to t
   - Also review: a whole-lockfile dependency-age policy (e.g. pnpm `minimumReleaseAge`); WORK-001 applies the 7-day cooldown to direct dependencies only (owner decision L3).
   - Also review: the secret scan reads committed history only, so a passing working-tree gate doesn't cover new uncommitted files. In WORK-001 a fixture was caught only by the committed gate run.
   - Also review: exact gitleaks fingerprints (`commit:file:rule:line`) break whenever commits are rewritten (squash/rebase), which currently forces merge-commit-only merging (WORK-001 Prove F6).
+  - Also review: a scheduled sweep of preview resources (Neon branches of closed PRs, stale Vercel aliases). It would close the residual LOW in which a superseded cleanup leaves a Neon branch until its 14-day expiry (WORK-001 fourth review; owner decision: post-F0, not in WORK-001).
+  - Also review: how `/ai-engineering:review` should recognise an external review that runs outside the repository (CodeRabbit on the PR). `externalReview` is still `null`, and a change to it is a gate change for the owner.
 
 ## Parked (undecided whether ever)
 - CV tailoring and cover-letter generation (depends on F8).
