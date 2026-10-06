@@ -13,11 +13,12 @@ corepack enable    # provides the pnpm version pinned in package.json
 pnpm install
 docker compose up -d
 cp .env.example .env   # then fill in BETTER_AUTH_SECRET (openssl rand -base64 32)
+pnpm db:migrate        # applies the committed SQL migrations to the local dev database (port 5433)
 pnpm dev
 ```
 
-The app is served at http://localhost:5173. Postgres runs in Docker on port 5433 (see `docker-compose.yml`).
-Google credentials are optional outside production.
+The app is served at http://localhost:5173. Postgres runs in Docker on port 5433 (see `docker-compose.yml`); `/app` needs the migrations above.
+Google credentials are optional outside production. To sign in locally you need Google credentials in `.env` and your email on the approved list: `pnpm allowlist add <your-email>`.
 
 ## Commands
 
@@ -93,12 +94,17 @@ Vercel's own Git auto-deploys are disabled (`vercel.json`), so deployments happe
 
 Required configuration (names only; never commit values):
 
-- Stage 2, repository secrets: `PREVIEW_VERCEL_TOKEN`, `PREVIEW_VERCEL_ORG_ID`, `PREVIEW_VERCEL_PROJECT_ID`, `PREVIEW_NEON_API_KEY`, `PREVIEW_NEON_PROJECT_ID`, `PREVIEW_BETTER_AUTH_SECRET`, `PREVIEW_OAUTH_PROXY_SECRET`, `PREVIEW_GOOGLE_CLIENT_ID`, `PREVIEW_GOOGLE_CLIENT_SECRET`. Repository variables: `PREVIEW_OAUTH_PROXY_PRODUCTION_URL`, `PREVIEW_ALIAS_PREFIX`.
-- Stage 3, repository variable: `PRODUCTION_DEPLOY_ENABLED=true`. In the `production` environment (required reviewer: the owner), secrets `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `DATABASE_URL` (pooled), `DATABASE_URL_UNPOOLED`, `BETTER_AUTH_SECRET`, `OAUTH_PROXY_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and the variable `PRODUCTION_URL` (https origin, no trailing slash).
+- Stage 2: a **separate Vercel team or account for previews, with no production project in it** (owner decision). Repository secrets: `PREVIEW_VERCEL_TOKEN` (a token of that preview scope only), `PREVIEW_VERCEL_ORG_ID`, `PREVIEW_VERCEL_PROJECT_ID`, `PREVIEW_NEON_API_KEY`, `PREVIEW_NEON_PROJECT_ID`, `PREVIEW_BETTER_AUTH_SECRET`, `PREVIEW_OAUTH_PROXY_SECRET`, `PREVIEW_GOOGLE_CLIENT_ID`, `PREVIEW_GOOGLE_CLIENT_SECRET`. Repository variables: `PREVIEW_OAUTH_PROXY_PRODUCTION_URL`, `PREVIEW_ALIAS_PREFIX`.
+- Stage 3: the GitHub `production` environment must require the owner's approval **and** restrict deployment branches to `main` (owner decision). In it, secrets `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `DATABASE_URL` (pooled), `DATABASE_URL_UNPOOLED`, `BETTER_AUTH_SECRET`, `OAUTH_PROXY_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and the environment variable `PRODUCTION_URL` (https origin, no trailing slash). Set the repository variable `PRODUCTION_DEPLOY_ENABLED=true` last. No `NEON_*` values are needed for production.
 
-Production secrets exist only in the `production` environment, so PR workflows cannot read them. The production job receives no Neon API credentials: it needs only the two database URLs, and Neon API keys exist only as the `PREVIEW_` secrets for the preview project. With `PRODUCTION_DEPLOY_ENABLED=true`, any missing production secret or variable fails the job once it is approved (it is never silently skipped).
+What protects what, accurately:
 
-The Vercel CLI is a pinned devDependency (`pnpm exec vercel`), so CI uses the version in the lockfile.
+- **Preview secrets are repository secrets.** Workflows run from branches of this repository, and the code they build and run, can read them. Anyone who can push a branch to this repository can use them, so they must be able to do no harm to production: previews have their own Neon project, their own auth and proxy secrets, and (Stage 2) a Vercel scope that contains no production project, so the preview token cannot touch production.
+- **Production secrets exist only in the `production` environment.** A job can read them only after the owner approves it, and only when it runs from `main`. Workflows on other branches cannot read them.
+- With `PRODUCTION_DEPLOY_ENABLED=true`, any missing production secret or variable fails the job once it is approved (it is never silently skipped).
+- Keep the repository on **merge commits only** (no squash or rebase): the `.gitleaksignore` fingerprints contain commit hashes, which squashing or rebasing would change.
+
+The Vercel CLI is a pinned devDependency (`pnpm exec vercel`), so CI uses the version in the lockfile. CI also writes an informational, non-blocking audit of all dependencies (including dev tooling) to the job summary; only the production audit at high severity blocks.
 
 ### Secret scan suppressions
 

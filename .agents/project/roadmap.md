@@ -60,6 +60,7 @@ Success: the owner can use the product from any device at a free public URL to t
 - **Post-F0 ai-engineering-system review** (not a product feature):
   - Review the candidates in `.agents/failures/` and `.agents/learnings/`: guard false positives, gate integrity through package scripts, narrow approval for destructive capabilities, and failed gates staying visible instead of being rerun until green.
   - Decide deliberately what to promote and how (planning D19).
+  - Also review: exact gitleaks fingerprints (`commit:file:rule:line`) break whenever commits are rewritten (squash/rebase), which currently forces merge-commit-only merging (WORK-001 Prove F6).
 
 ## Parked (undecided whether ever)
 - CV tailoring and cover-letter generation (depends on F8).

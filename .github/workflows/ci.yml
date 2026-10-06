@@ -12,11 +12,13 @@ on:
 permissions:
   contents: read
 
-# Superseded PR runs are cancelled. Runs on main are never cancelled (a production deploy must not
-# be interrupted midway).
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Concurrency is set per job, not for the whole workflow, so a production job waiting for the
+# owner's approval cannot hold back the CI of later pushes to main:
+#  - quality: a newer push to the same PR cancels the superseded run; every push to main gets its
+#    own group (keyed by commit), so a run on main is never cancelled by another push.
+#  - preview: one deployment per PR at a time, never cancelled midway (a newer one replaces a
+#    queued older one).
+#  - production: deployments are serialised and never cancelled midway.
 
 jobs:
   # Never uses repository or production secrets.
@@ -26,6 +28,9 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
+    concurrency:
+      group: quality-${{ github.event.pull_request.number || github.sha }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       # Full history: the gate's secret scan (gitleaks) reads every commit.
       - name: Check out full history
@@ -49,9 +54,9 @@ jobs:
           set -euo pipefail
           pnpm install --frozen-lockfile
 
-      # Same container as docker-compose.yml's postgres-test. A service container cannot pass the
-      # `-c app.disposable_test_server=on` flag the test safeguards require, so it is started
-      # with `docker run`. Throwaway credentials, loopback only, data in tmpfs.
+      # Same image (pinned by digest) as docker-compose.yml's postgres-test. A service container
+      # cannot pass the `-c app.disposable_test_server=on` flag the test safeguards require, so it
+      # is started with `docker run`. Throwaway credentials, loopback only, data in tmpfs.
       - name: Start disposable test Postgres
         run: |
           set -euo pipefail
@@ -61,7 +66,7 @@ jobs:
             --env POSTGRES_USER=app \
             --env POSTGRES_PASSWORD=app \
             --env POSTGRES_DB=postgres \
-            postgres:18.4-alpine \
+            postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15 \
             postgres -c app.disposable_test_server=on
 
       - name: Wait for Postgres to accept connections
@@ -92,6 +97,21 @@ jobs:
             exit 1
           fi
           bash -euo pipefail -c "$gate"
+
+      # Informational only: the full audit (all dependencies, including dev tooling) is written to
+      # the job summary. It never affects the gate or the job result (the gate's own
+      # `pnpm audit --prod --audit-level high` is what blocks).
+      - name: Full dependency audit (informational, non-blocking)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          {
+            echo "### Full dependency audit (informational, non-blocking)"
+            echo
+            echo '```'
+            pnpm audit --json | jq -r '.metadata.vulnerabilities | to_entries | map("\(.key): \(.value)") | join(", ")'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------------------------
   # Stage 2: preview environments (PRs from this repository only)
@@ -155,6 +175,9 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    concurrency:
+      group: preview-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     outputs:
       preview_url: ${{ steps.deploy.outputs.preview_url }}
     env:

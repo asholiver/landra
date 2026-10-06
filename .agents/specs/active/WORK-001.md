@@ -37,13 +37,15 @@ Excluded (later features):
 - R4 Signing in with a Google account whose verified email is on the allowlist creates or loads the user and lands on `/app`.
 - R5 Signing in with a Google account not on the allowlist creates no user, session or account rows, and shows a neutral "access not available" message.
 - R6 Sign-out invalidates the server session and clears the cookie.
-- R7 `/healthz` returns 200 with build version and no database call (liveness). It's cheap and doesn't wake Neon.
+- R7 `/healthz` returns 200 with the build version and no database call (liveness). It's cheap and doesn't wake Neon. The version comes from `GIT_SHA`, then `VERCEL_GIT_COMMIT_SHA`, then `"dev"`.
 - R8 The product name renders from a single config constant, currently the working label "Job Search Copilot" (not an approved name). The working name "landra" doesn't appear in UI copy.
 - R9 Every HTTP response carries `X-Robots-Tag: noindex, nofollow`; pages include `<meta name="robots" content="noindex, nofollow">`; `robots.txt` allows crawling (so the noindex can be seen).
 - R10 Security headers on all responses: CSP (no `unsafe-inline` scripts; nonce-based if needed), `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `frame-ancestors 'none'` (via CSP), and a restrictive `Permissions-Policy`.
 - R11 Structured JSON server logs to stdout (request id, route, status, duration). Never logs tokens, cookies, secrets or full email addresses.
 - R12 Configuration is validated at startup with zod. Missing or invalid env vars fail fast with a clear message that names the variable but not its value.
 - R13 Allowlist script: `pnpm allowlist add|remove|list <email>` against the database in `DATABASE_URL`. Emails are normalised (trimmed, lower-cased).
+  - `remove` also revokes all of that user's sessions in the same READ COMMITTED transaction (owner decision M-1), and reports how many sessions it revoked.
+  - A database trigger refuses new sessions for emails that aren't allowlisted.
 - R14 CI on every PR from this repository:
   1. The `full` gate and the Node-build smoke test run.
   2. A branch is created in the **separate preview Neon project** (never production; ADR-0003 as amended), and migrations are applied to it.
@@ -58,7 +60,7 @@ Excluded (later features):
   3. After approval: production migrations are applied, the production deployment runs, and a post-deploy `/healthz` check runs.
 - R16 Vercel's own Git auto-deploys are disabled. Deployments happen only through CI (`vercel build` + `vercel deploy --prebuilt`), so gates always run first.
 - R17 Vercel functions are pinned to `lhr1` in `vercel.json`. The Neon project is in `aws-eu-west-2`.
-- R18 The Node build: building without the Vercel preset produces a server that `react-router-serve` (or the official Node adapter) can start. CI starts it and asserts `/` and `/healthz` return 200.
+- R18 The Node build: building without the Vercel preset produces a server started with `pnpm start`. That is the custom Express server `server/node-server.ts`, using the official `@react-router/express` adapter and run via Node 24 type stripping; `@react-router/serve` was removed. `pnpm smoke:node` (part of the `full` gate) starts it and asserts that `/` and `/healthz` return 200 with the shared security headers.
 ## Business rules
 - BR1 Only allowlisted emails may have accounts (ADR-0002). The allowlist is checked server-side in Better Auth's user-creation hook, not in the UI.
 - BR2 Only Google accounts with a verified email are accepted.
@@ -129,7 +131,7 @@ Threats and controls:
   - allowlist script add/remove/list;
   - Better Auth user-creation hook refuses a non-allowlisted email and leaves no rows behind;
   - session invalidation on sign-out.
-- E2E (Playwright, against a local production build with CI Postgres):
+- E2E (Playwright, against the production Node server build, with sessions seeded in a per-run database on the disposable `postgres-test` server):
   - `/` and `/sign-in` render;
   - `/app` redirects to `/sign-in` when signed out;
   - with a test session seeded directly in the database by a test-only fixture (not an app route), `/app` renders the shell, and sign-out returns to `/` and `/app` redirects again;
@@ -159,7 +161,7 @@ Threats and controls:
   - sign-out returns to `/`, and `/app` then redirects to `/sign-in`.
 - AC8 Signed-out requests to `/app` and `/app/anything` redirect to `/sign-in`; a crafted `returnTo=https://evil.example` is ignored (automated test).
 - AC9 Vercel function region is `lhr1` and the Neon project region is `aws-eu-west-2` (verified in the deployment summary and Neon console).
-- AC10 The CI Node build starts with the standard React Router Node server, and `/` and `/healthz` return 200.
+- AC10 The Node build starts with `pnpm start` (custom Express server with `@react-router/express`), and `/` and `/healthz` return 200. Verified by `pnpm smoke:node` in the `full` gate, which CI runs.
 - AC11 No file under `src/server/` imports `react-router` or `@vercel/*` (automated check).
 - AC12 Lighthouse (local production build) on `/` and `/sign-in`: Performance, Accessibility, Best Practices ≥98. axe reports no serious or critical issues on `/`, `/sign-in`, `/app`.
 - AC13 The repository contains no secrets, `.env` files or allowlisted emails. The secret scan passes.
@@ -224,14 +226,23 @@ Implementation happens locally first. External services are needed only at the s
 
   Preview secrets go into GitHub repository/PR-accessible secrets. Production secrets go only into the `production` environment (Stage 3). Delivery gives exact step-by-step instructions at this point. Covers AC4.
 - **Stage 3: production.** The owner:
-  - creates the GitHub `production` environment with themselves as required reviewer;
-  - adds the production secrets;
+  - creates the GitHub `production` environment with themselves as required reviewer **and deployment branches restricted to `main`** (owner decision C/F2);
+  - adds the production environment secrets and the `PRODUCTION_URL` environment variable;
+  - sets the repository variable `PRODUCTION_DEPLOY_ENABLED=true`, last;
   - registers the production redirect URI with Google;
   - approves the first production job;
   - runs the allowlist script for their own email;
   - then performs the manual checks AC5–AC7 and AC9.
 
-Secrets needed by Stage 3: `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `NEON_API_KEY`, `NEON_PROJECT_ID`, `DATABASE_URL` (prod, pooled), `DATABASE_URL_UNPOOLED` (prod, migrations), `BETTER_AUTH_SECRET`, `OAUTH_PROXY_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
+Stage 3 configuration. Production gets no Neon management credentials (owner decision T4-5).
+- **`production` environment secrets:** `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `DATABASE_URL` (pooled), `DATABASE_URL_UNPOOLED` (migrations), `BETTER_AUTH_SECRET`, `OAUTH_PROXY_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`.
+- **Environment variable:** `PRODUCTION_URL` (https origin, no trailing slash).
+- **Repository variable:** `PRODUCTION_DEPLOY_ENABLED=true`, set last.
+
+Stage 2 configuration, repository level. Preview Vercel resources live in a **separate Vercel team or account with no production project** (owner decision B/F1, ADR-0003 amended).
+- **Secrets:** `PREVIEW_VERCEL_TOKEN`, `PREVIEW_VERCEL_ORG_ID`, `PREVIEW_VERCEL_PROJECT_ID`, `PREVIEW_NEON_API_KEY`, `PREVIEW_NEON_PROJECT_ID`, `PREVIEW_BETTER_AUTH_SECRET`, `PREVIEW_OAUTH_PROXY_SECRET`, `PREVIEW_GOOGLE_CLIENT_ID`, `PREVIEW_GOOGLE_CLIENT_SECRET`.
+- **Variables:** `PREVIEW_OAUTH_PROXY_PRODUCTION_URL`, `PREVIEW_ALIAS_PREFIX`.
+- `PREVIEW_GOOGLE_CLIENT_SECRET` is **subject to the F3 investigation.** If previews need the production Google client secret, that isn't accepted automatically.
 ## Implementation state
 <!-- maintained by /ai-engineering:deliver: tasks, owners, status, gate results -->
 Tasks run one at a time in this checkout on `work/WORK-001-f0-foundation` (no `worktree.baseRef`). Stage 0 only.
@@ -243,7 +254,7 @@ Tasks run one at a time in this checkout on `work/WORK-001-f0-foundation` (no `w
 | T2 Server foundation: config, database, auth, allowlist | ai-engineering:backend | checkpoint | `src/server/**`, `src/shared/**`, `drizzle/**`, `drizzle.config.ts`, `scripts/allowlist.ts`, auth resource route `app/routes/api.auth.$.ts`, `app/routes/healthz.ts`, session-guard helper, unit and integration tests | R3–R7, R11–R13, BR1–BR3, AC8, AC11, part of AC13 | done: targeted security review plus re-review; all BLOCKER/HIGH fixed; M-1, M-2, M-3, M-A and L-A to L-E fixed; L-2 deferred to F5 |
 | T3 Public and app UI, headers, noindex, accessibility and performance | ai-engineering:frontend | T2 | `app/**` (except T2's routes), `app/entry.server.tsx` (security headers, nonce CSP, X-Robots-Tag, X-Request-Id), `src/shared/product.ts` (working label), `public/robots.txt`, E2E + axe tests, Lighthouse CI config | R2, R8–R10, AC6 (locally), AC12, AC14 | done. Targeted security review: no BLOCKER/HIGH; 1 MEDIUM and 5 LOW reported to the owner |
 | T4 CI workflows and Node-build smoke | ai-engineering:platform | T3 | `.github/workflows/**`, `.github/dependabot.yml`, `vercel.json`, Node-build smoke script, secret-scan config | R14–R18 (workflow files only), AC10, AC13; jobs needing secrets report SKIPPED until Stage 2 | done locally (workflows not yet run on GitHub). zizmor default persona: no findings, but it ran offline, so the network audits weren't run and are covered by the Prove security review. T3 was accepted complete by the owner on 2026-10-05; the final review cycle must include `d5676b9` and `4f3111b` |
-| Prove | coordinator + qa + security-reviewer | T4 | full gate, QA against the spec, security review (auth, secrets, headers, CI) | — | pending |
+| Prove | coordinator + qa + security-reviewer | T4 | full gate, QA against the spec, security review (auth, secrets, headers, CI) | — | done 2026-10-06 (committed full gate PASSED at 4fc5d37; QA PASS with 1 MEDIUM gap; security: no BLOCKER, ready for Stage 1; 1 HIGH blocks Stage 2). Remediation proposal awaiting owner approval |
 
 T1 results (2026-10-05):
 - **A3 Node version: 24.**
@@ -403,9 +414,16 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
     - **T3-L3:** stack traces in `.data` responses when `NODE_ENV` isn't `production`, including an empty string.
     - **T3-L4:** the E2E health check could accept an already-running server on port 4173.
     - **T3-L5:** no `Cache-Control: private, no-store` on authenticated `/app` HTML.
-    - INFO: `/sign-out` returns 500 rather than 503 on invalid config (still fails closed).
+    - INFO: `/sign-out` returns 500 rather than 503 on invalid config (still fails closed). **Superseded by Prove remediation A1 (2026-10-06):**
+      - New E2E `database-unavailable.spec.ts` (per-run server, `DATABASE_URL` at a refused loopback port, signed session cookie):
+        - `/app`, `/app/anything` and `/app.data` → 503 generic page, with no shell content or internals, plus `no-store` and noindex;
+        - `/healthz` → 200 with the run's version.
+      - **New finding, fixed:** with the database down, `POST /sign-out` returned 302 and cleared the cookie, while Better Auth silently failed to delete the server session. That was a **fail-open sign-out** (R6).
+        - Fix: read the session first, so a database failure → 503, the cookie isn't cleared, and there's no redirect. Config and Origin checks moved inside the same try, so invalid config → 503. The fixed-text body has `no-store`. Covered by E2E.
+        - Residual (code comment): a database failure in the moment between that read and the delete isn't detected.
+      - `server-mode.spec.ts` now triggers its unhandled error via `GET /api/auth/get-session`.
   - **After the commit:**
-    - The committed `run-gate.sh full` **FAILED** twice on the E2E test "shows the loading state while the sign-in request is in flight".
+    - The committed `run-gate.sh full` **FAILED** twice on the E2E test "shows the loading state while the sign-in request is in flight". **Resolved** in `d5676b9`: made deterministic, 440/440 on repeat, committed gate PASSED.
     - Root cause: a test race. The click could land before the deferred `sign-in.js` attached its submit handler.
     - Being made deterministic with a readiness marker, without weakening the assertion. It is not being rerun until green.
   - **Owner decisions** (Ashley Oliver, 2026-10-05):
@@ -430,7 +448,7 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
     - **T3-L3:** React Router runs in development mode only when `NODE_ENV=development`. Tested for unset, empty, `test` and `production`. The test wasn't proven to fail when a stack does leak.
     - **T3-L4:** a per-run version is required from `/healthz`, and setup fails clearly if the port is in use.
     - **T3-L5:** `Cache-Control: private, no-store` on all `/app` responses (HTML, `.data`, and the 404 inside the shell).
-- **T4 results** (2026-10-06, uncommitted, awaiting owner decisions):
+- **T4 results** (2026-10-06; committed as `220abb1` after owner decisions):
   - **What was built:**
     - removed `@react-router/serve`;
     - `pnpm smoke:node` (`pnpm start` on a free port with explicit non-secret env and a per-run version; asserts `/` and `/healthz` return 200 with the shared headers);
@@ -465,7 +483,76 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
     6. **Predictable PR preview aliases are accepted provisionally,** to be verified at Stage 2. Alias cleanup is follow-up operational hygiene unless Stage 2 shows it's needed for correctness or security.
     7. **zizmor is re-run with its default security analysis** on the final workflows before the commit. Meaningful findings are investigated, not merely suppressed.
     8. **`.gitleaksignore` stays limited to the 11 reviewed exact fingerprints** (no wildcard, path or rule suppressions) and is included in the final security review.
+- **Prove results** (2026-10-06, HEAD 4fc5d37):
+  - **QA:** PASS locally, with one MEDIUM gap (no automated 503 test for database unavailability).
+  - **Security:** no BLOCKER; ready for Stage 1 subject to the Stage 1 GitHub settings. All action pins verified against official commits, with no advisories. Whether each pin is the *latest* version is **UNVERIFIED** (a guard false positive blocked that check). All 11 `.gitleaksignore` fingerprints were verified as test-only throwaway values.
+  - **Findings:**
+    - F1 HIGH (blocks Stage 2): the preview Vercel token could act on production.
+    - F2 MEDIUM (Stage 3): the `production` environment needs a deployment-branch policy.
+    - F3 MEDIUM (Stage 2): preview would hold the production Google client secret.
+    - F4 LOW: the Neon delete action installs an unpinned `neonctl`.
+    - F5 LOW: dev-tooling advisories; Vercel CLI cooldown.
+    - F6 LOW: squash/rebase merging invalidates the gitleaks fingerprints.
+    - F7 LOW/INFO: gate integrity relies on review.
+    - INFO: CI concurrency; Postgres image pinned by tag.
+- **Owner decisions after Prove** (Ashley Oliver, 2026-10-06):
+  - **A (pre-Stage-1 remediation): approved.**
+    - A1: 503 test.
+    - A2: README correction.
+    - A3: CI concurrency and Postgres digest.
+    - A4: replace the Neon delete action.
+    - A5: remove `VERCEL_TOKEN` from `vercel build` **only if** documented CLI behaviour and local evidence support it. Otherwise it's a Stage 2 item. No guessing.
+    - A6: pin a Vercel CLI version satisfying the 7-day cooldown; add a non-blocking full dev-dependency audit as CI evidence; document the dev-tooling advisories as accepted F0 risk. No fixing of the CLI's transitive dependencies. The production-dependency HIGH audit stays blocking.
+    - A7: spec updates.
+    - A8: AC1 fresh-clone dev start and AC2 timing.
+    - A9: verification and commit.
+  - **B/F1:** preview deployments use a structurally separate Vercel team or account with no production project (ADR-0003 amended). No Vercel resources until Stage 2.
+  - **B/F3:** investigate, using the installed Better Auth source, whether preview OAuth needs the Google client secret.
+    - If it doesn't, prove a client-ID-only preview design, including a negative test.
+    - If it does, exposing the production Google client secret to preview workflows is **not** accepted automatically.
+    - Report before Stage 2.
+  - **C/F2:** before Stage 3, the `production` environment must require owner approval **and** restrict deployments to `main`.
+  - **Stage 1: conditionally approved.** Conditions: after the remediation commit, the committed full gate passes, the tree is clean, and there's no new BLOCKER/HIGH affecting Stage 1. Then:
+    1. The owner applies the GitHub settings: ruleset, merge commits only, Actions restrictions, no write collaborators, secret scanning with push protection, Dependabot security updates.
+    2. After the owner confirms the settings, the coordinator asks for explicit approval of `git push -u origin work/WORK-001-f0-foundation`.
+    3. A draft PR; observe the first CI run.
+    - No merge, Stage 2 resources, secrets or deployment are authorised.
+  - **Post-F0 evidence:** exact gitleaks fingerprints currently constrain the merge strategy whenever commits are rewritten. Not redesigned during WORK-001.
+- **Prove remediation A results** (2026-10-06):
+  - **A1:** 503 behaviour proven by E2E. A fail-open sign-out was found and fixed (see the T3-review INFO note above). E2E now 47 tests.
+  - **A2:** README corrected:
+    - preview secrets are readable by same-repo branch workflows and build code;
+    - the separate Vercel scope (F1);
+    - the `production` environment's approval and `main` restriction (F2);
+    - merge commits only (F6);
+    - `pnpm db:migrate` added to Setup (a gap found by the AC1 run).
+  - **A3:** concurrency is now per job (quality cancels only superseded PR runs; `main` runs get their own groups; production stays serialised and non-cancelling). Postgres is pinned by digest `sha256:9a8afca5…de15` in CI and docker-compose. **Unverified until the first GitHub run:** how a production job waiting for approval interacts with its group.
+  - **A4:** the Neon delete action is replaced by direct REST calls.
+    - The key is passed in a header via stdin.
+    - 404 counts as success.
+    - The branch id is validated, and default branches are refused.
+    - **Unverified until Stage 2:** the `default` field name in list responses, the 404 body, the 423 "locked" handling, and pagination beyond 100 branches.
+  - **A5: not done** (owner rule). Vercel's docs don't clearly say `vercel build` works without a token. **Stage 2 item:** test `vercel build` with only `.vercel/` from `vercel pull` and no token; drop the token from the build steps if that works.
+  - **A6:**
+    - `vercel` pinned to **61.0.0** (published 2026-09-29, the newest version ≥7 days old); no new dependency build scripts.
+    - A non-blocking full dependency audit is added to CI and reported in the job summary.
+    - Production audit unchanged (1 moderate, accepted).
+    - **Accepted F0 risk (owner decision A6):** the full audit of all dependencies reports 9 low, 27 moderate, 23 high and 1 critical (45 distinct advisories). 37 come through the `vercel` CLI devDependency (e.g. `tar` critical, `undici`, `minimatch`, `js-yaml`, `path-to-regexp`); the rest through `@lhci/cli` and other dev tooling, plus the accepted esbuild advisory.
+    - The exposure is CI-only tooling that holds deploy tokens, and the advisories sit mostly in code paths the CLI doesn't use. Transitive fixes are not in scope.
+    - Reassess on CLI upgrades (Dependabot, with a 7-day cooldown) and before F5.
+  - **A7:** spec updated (R7, R13, R18/AC10, Stage 2/3 configuration, Testing, statuses, Review state); `.env.example` comment updated.
+  - **A8:**
+    - **AC1 PASS:** fresh clone → `pnpm install --frozen-lockfile` → `.env` → `pnpm dev` served `/` with 200 in 3s. `docker compose up` was skipped in the clone because the repository's own containers already hold 5433/5434.
+    - **AC2 PASS:** fast gate 4s.
+  - **Linting:** actionlint clean; zizmor default persona no findings (offline only; network audits not run).
+  - **A9:** coordinator `run-gate.sh fast` → PASSED (4s). The working-tree `full` in a clean environment exited 0: 209 unit, 49 integration and 47 E2E tests, the smoke test, Lighthouse, the audit at HIGH, and no leaks.
 - **Local Postgres prerequisite:** integration tests must fail fast with a clear, actionable message (e.g. "PostgreSQL is not reachable at <host:port>; run `docker compose up -d`") when the database is unavailable, instead of an obscure test failure. Keep it a lightweight pre-check, not new orchestration (assigned to T2).
 ## Review state
 <!-- maintained by /ai-engineering:review: gates, security, QA, EXTERNAL REVIEW status -->
--
+- **Prove (deliver), 2026-10-06, HEAD `4fc5d37`:**
+  - Committed `full` gate PASSED.
+  - QA: PASS locally, with one MEDIUM gap (503 test).
+  - Security review: no BLOCKER; ready for Stage 1 subject to the GitHub settings. F1 (HIGH) blocks Stage 2.
+  - Details are under "Prove results" in Implementation state; the remediation is in progress.
+- **External review:** not configured (`externalReview: null`). The independent `/ai-engineering:review` hasn't run yet.
+- **Not verifiable locally (Stage 1/2/3):** AC3 on GitHub, AC4, AC5, AC6 on production, AC7, AC9, R14–R17 on the platforms, and the Stage 2 verification items.

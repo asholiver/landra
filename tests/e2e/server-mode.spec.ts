@@ -5,8 +5,8 @@ import { waitUntilOwnServerReady } from "./support/readiness";
 
 // The Node server must not send stack traces to clients unless NODE_ENV is explicitly
 // "development". A throwaway server per NODE_ENV value is started on its own port, with an
-// explicit environment that has NO application configuration, so POST /sign-out.data hits an
-// unhandled error (invalid configuration) inside the action.
+// explicit environment that has NO application configuration, so the auth endpoint hits an
+// unhandled error (invalid configuration) inside its loader.
 const root = resolve(import.meta.dirname, "../..");
 const PORT = 4175;
 const VERSION = "server-mode-test";
@@ -44,7 +44,7 @@ for (const { label, value } of NODE_ENV_CASES) {
         hasExited: () => server.exitCode !== null,
         timeoutMs: 30_000,
       });
-      const response = await fetch(`http://localhost:${PORT}/sign-out.data`, { method: "POST" });
+      const response = await fetch(`http://localhost:${PORT}/api/auth/get-session`);
       const body = await response.text();
       expect(response.status).toBe(500);
       expect(body).toContain("Unexpected Server Error");
