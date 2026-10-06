@@ -9,7 +9,19 @@ const root = join(import.meta.dirname, "../..");
 type HeaderRule = { source: string; headers: Array<{ key: string; value: string }> };
 const vercelConfig = JSON.parse(readFileSync(join(root, "vercel.json"), "utf8")) as {
   headers: HeaderRule[];
+  regions?: string[];
+  git?: { deploymentEnabled?: unknown };
 };
+
+describe("vercel.json deployment settings (R16, R17)", () => {
+  it("pins functions to London (lhr1)", () => {
+    expect(vercelConfig.regions).toEqual(["lhr1"]);
+  });
+
+  it("disables Vercel Git auto-deployments, so deployments only happen through CI", () => {
+    expect(vercelConfig.git?.deploymentEnabled).toBe(false);
+  });
+});
 
 const ASSETS_SOURCE = "/assets/(.*)";
 const IMMUTABLE_CACHE = "public, max-age=31536000, immutable";

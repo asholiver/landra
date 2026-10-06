@@ -1,0 +1,28 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Let new releases age a week before proposing them (supply-chain safety).
+    cooldown:
+      default-days: 7
+    # The repository pins exact versions; keep doing so.
+    versioning-strategy: increase
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    # Security updates are separate from these version updates and are not limited by the
+    # settings above; enable "Dependabot security updates" in the repository settings.
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]

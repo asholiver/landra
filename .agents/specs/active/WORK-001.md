@@ -242,7 +242,7 @@ Tasks run one at a time in this checkout on `work/WORK-001-f0-foundation` (no `w
 | ⛔ Gate checkpoint | Owner | T1 | Owner reviews the proposed gate commands; they're committed only after approval | — | done (approved by Ashley Oliver, 2026-10-05) |
 | T2 Server foundation: config, database, auth, allowlist | ai-engineering:backend | checkpoint | `src/server/**`, `src/shared/**`, `drizzle/**`, `drizzle.config.ts`, `scripts/allowlist.ts`, auth resource route `app/routes/api.auth.$.ts`, `app/routes/healthz.ts`, session-guard helper, unit and integration tests | R3–R7, R11–R13, BR1–BR3, AC8, AC11, part of AC13 | done: targeted security review plus re-review; all BLOCKER/HIGH fixed; M-1, M-2, M-3, M-A and L-A to L-E fixed; L-2 deferred to F5 |
 | T3 Public and app UI, headers, noindex, accessibility and performance | ai-engineering:frontend | T2 | `app/**` (except T2's routes), `app/entry.server.tsx` (security headers, nonce CSP, X-Robots-Tag, X-Request-Id), `src/shared/product.ts` (working label), `public/robots.txt`, E2E + axe tests, Lighthouse CI config | R2, R8–R10, AC6 (locally), AC12, AC14 | done. Targeted security review: no BLOCKER/HIGH; 1 MEDIUM and 5 LOW reported to the owner |
-| T4 CI workflows and Node-build smoke | ai-engineering:platform | T3 | `.github/workflows/**`, `.github/dependabot.yml`, `vercel.json`, Node-build smoke script, secret-scan config | R14–R18 (workflow files only), AC10, AC13; jobs needing secrets report SKIPPED until Stage 2 | pending |
+| T4 CI workflows and Node-build smoke | ai-engineering:platform | T3 | `.github/workflows/**`, `.github/dependabot.yml`, `vercel.json`, Node-build smoke script, secret-scan config | R14–R18 (workflow files only), AC10, AC13; jobs needing secrets report SKIPPED until Stage 2 | done locally (workflows not yet run on GitHub). zizmor default persona: no findings, but it ran offline, so the network audits weren't run and are covered by the Prove security review. T3 was accepted complete by the owner on 2026-10-05; the final review cycle must include `d5676b9` and `4f3111b` |
 | Prove | coordinator + qa + security-reviewer | T4 | full gate, QA against the spec, security review (auth, secrets, headers, CI) | — | pending |
 
 T1 results (2026-10-05):
@@ -430,6 +430,41 @@ Gate checkpoint decisions (Ashley Oliver, 2026-10-05):
     - **T3-L3:** React Router runs in development mode only when `NODE_ENV=development`. Tested for unset, empty, `test` and `production`. The test wasn't proven to fail when a stack does leak.
     - **T3-L4:** a per-run version is required from `/healthz`, and setup fails clearly if the port is in use.
     - **T3-L5:** `Cache-Control: private, no-store` on all `/app` responses (HTML, `.data`, and the 404 inside the shell).
+- **T4 results** (2026-10-06, uncommitted, awaiting owner decisions):
+  - **What was built:**
+    - removed `@react-router/serve`;
+    - `pnpm smoke:node` (`pnpm start` on a free port with explicit non-secret env and a per-run version; asserts `/` and `/healthz` return 200 with the shared headers);
+    - `vercel.json` with `regions: ["lhr1"]` and `git.deploymentEnabled: false` (per Vercel docs, 2026-08-25), with a test;
+    - `ci.yml` (quality, secret-scan, preview-config/preview/preview-comment, production-config/production) and `preview-cleanup.yml`;
+    - `dependabot.yml`;
+    - `pnpm scan:secrets` (gitleaks v8.30.1, official image pinned by multi-arch digest, full history, redacted);
+    - `.gitleaksignore` with 11 exact fingerprints for test fixtures already in history, each justified, no wildcards;
+    - a README CI/CD section.
+  - **Workflow hardening:**
+    - actions pinned by SHA (actions/checkout v6.1.0, actions/setup-node v6.5.0, neondatabase create-branch v6.4.0 and delete-branch v3.2.1), read from tags with `git ls-remote` but not cross-checked with the GitHub API;
+    - no `pull_request_target`; least-privilege permissions; `persist-credentials: false`; `set -euo pipefail`;
+    - the full gate is read from `.agents/gates.json`, not duplicated in YAML.
+  - **Linting:** actionlint clean. zizmor (`--offline`): only deliberate pedantic LOW findings remain; not re-run with the default persona after the final edits.
+  - **Skip behaviour:**
+    - Preview jobs are skipped unless all preview secrets and variables exist.
+    - Production is skipped unless the repository variable `PRODUCTION_DEPLOY_ENABLED=true`, because environment secrets aren't visible to a config-check job outside the environment. Once enabled, missing secrets make the job fail, not skip.
+  - **Coordinator verification:**
+    - `run-gate.sh fast` → PASSED.
+    - The proposed full command (with `smoke:node` and `scan:secrets`) in a clean environment exited 0: 209 unit, 49 integration and 42 E2E tests, the smoke test, Lighthouse, the audit at HIGH, and no leaks.
+  - **Unverified until Stage 2/3:**
+    - the Vercel CLI flow (`--prebuilt` runtime env, `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` handling);
+    - preview aliasing `<PREVIEW_ALIAS_PREFIX>-pr-<N>.vercel.app` (needed because `BETTER_AUTH_URL` must be known before the deploy);
+    - Neon action re-run and missing-branch behaviour;
+    - alias cleanup isn't implemented.
+  - **Owner decisions on T4** (Ashley Oliver, 2026-10-06):
+    1. **Approved gate change:** `full` adds `pnpm smoke:node` (after `build:vercel`) and `pnpm scan:secrets` (last). The duplicate CI steps and job are removed, so CI runs them only through the gate.
+    2. **The Vercel CLI becomes an exact, locked devDependency** executed from the lockfile in CI (no `pnpm dlx`).
+    3. **`PRODUCTION_DEPLOY_ENABLED` is the explicit production switch.** Off by default. Once enabled, missing production configuration fails rather than skipping.
+    4. **The repository-level preview Vercel token is accepted for F0,** subject to the Stage 1 GitHub controls for outside collaborators and forks, and to the final security review of the exact workflow triggers and permissions.
+    5. **`NEON_API_KEY` and `NEON_PROJECT_ID` are removed from Stage 3.** Production gets database URLs only, with no Neon management credentials.
+    6. **Predictable PR preview aliases are accepted provisionally,** to be verified at Stage 2. Alias cleanup is follow-up operational hygiene unless Stage 2 shows it's needed for correctness or security.
+    7. **zizmor is re-run with its default security analysis** on the final workflows before the commit. Meaningful findings are investigated, not merely suppressed.
+    8. **`.gitleaksignore` stays limited to the 11 reviewed exact fingerprints** (no wildcard, path or rule suppressions) and is included in the final security review.
 - **Local Postgres prerequisite:** integration tests must fail fast with a clear, actionable message (e.g. "PostgreSQL is not reachable at <host:port>; run `docker compose up -d`") when the database is unavailable, instead of an obscure test failure. Keep it a lightweight pre-check, not new orchestration (assigned to T2).
 ## Review state
 <!-- maintained by /ai-engineering:review: gates, security, QA, EXTERNAL REVIEW status -->

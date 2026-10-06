@@ -1,0 +1,56 @@
+name: Preview cleanup
+
+# Deletes the PR's branch in the PREVIEW Neon project when the PR closes. Skipped while the
+# preview environment is not configured. pull_request (never pull_request_target): fork PRs get
+# no secrets and never created a branch.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-cleanup-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup-config:
+    name: Cleanup configuration check
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check that the preview Neon secrets exist
+        id: check
+        env:
+          PREVIEW_NEON_API_KEY: ${{ secrets.PREVIEW_NEON_API_KEY }}
+          PREVIEW_NEON_PROJECT_ID: ${{ secrets.PREVIEW_NEON_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PREVIEW_NEON_API_KEY" ] && [ -n "$PREVIEW_NEON_PROJECT_ID" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "### Preview environment not configured — skipped (Stage 2)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  delete-preview-branch:
+    name: Delete preview Neon branch
+    needs: cleanup-config
+    if: >-
+      needs.cleanup-config.outputs.configured == 'true' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Delete the branch (PREVIEW project only)
+        uses: neondatabase/delete-branch-action@4468d825d5a88ef4012f1705a82f02ec3072f776 # v3.2.1
+        with:
+          project_id: ${{ secrets.PREVIEW_NEON_PROJECT_ID }}
+          api_key: ${{ secrets.PREVIEW_NEON_API_KEY }}
+          branch: preview/pr-${{ github.event.pull_request.number }}

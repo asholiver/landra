@@ -1,0 +1,24 @@
+# Reviewed false positives for `pnpm scan:secrets` (gitleaks). Each line is ONE exact finding
+# (<commit>:<file>:<rule>:<line>), for a literal that appears in git HISTORY, which cannot be
+# fixed by editing the current file or by an inline allow comment. Every entry is a hard-coded
+# fixture in a test file used only against throwaway or in-memory targets; none protects anything
+# real. Never add wildcard, path or rule-level ignores: review each new finding, then add one line.
+
+# E2E rate-limit test: auth secret for its own throwaway local test server.
+d5676b942b2f0642c040587411339e8e8af866b8:tests/e2e/rate-limit.spec.ts:generic-api-key:34
+# Integration helper: auth secret for the disposable test database runtime.
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/integration/helpers.ts:generic-api-key:16
+# Hardening test: strong-looking secret fixture proving config accepts a strong production secret.
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/integration/hardening.test.ts:generic-api-key:6
+# OAuth proxy test: proxy secret and auth secret fixtures for an in-process test.
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/integration/oauth-proxy.test.ts:generic-api-key:9
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/integration/oauth-proxy.test.ts:generic-api-key:14
+# Log-redaction tests: fake session token used to prove it is redacted.
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/unit/auth-logger.test.ts:generic-api-key:5
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/unit/logger.test.ts:generic-api-key:50
+# Same fake JWT (header.payload.signature with placeholder content) used to prove redaction.
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/unit/logger.test.ts:jwt:107
+# Config validation tests: secret fixtures for the production-strength and distinctness rules.
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/unit/config.test.ts:generic-api-key:11
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/unit/config.test.ts:generic-api-key:12
+4ee26c66bbf16b0a1aa3fd2efe15b19b54e28318:tests/unit/config.test.ts:generic-api-key:176

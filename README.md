@@ -31,6 +31,8 @@ Google credentials are optional outside production.
 | `pnpm lint` / `pnpm format` | Biome check / check and fix |
 | `pnpm typecheck` | Route type generation and `tsc` |
 | `pnpm test` | Unit tests |
+| `pnpm smoke:node` | Builds, runs `pnpm start` on a free port with explicit non-secret config, checks `/` and `/healthz` (200 and shared headers), stops it |
+| `pnpm scan:secrets` | Scans the full git history for secrets (gitleaks, pinned Docker image; needs Docker) |
 | `pnpm test:integration` | Integration tests; need the disposable test database (see below) |
 | `pnpm test:e2e` | Playwright E2E (incl. axe) against the production Node build; needs the disposable test database, see below (first run: `pnpm exec playwright install chromium`) |
 
@@ -73,4 +75,35 @@ The Playwright global setup builds the Node server, creates and migrates its own
 - Pages rendered by React Router (document, data and resource requests, the 404 page) get them, plus an `X-Request-Id` and a log line, from the root middleware (`app/lib/request-scope.server.ts`). Inline scripts there carry a per-request CSP nonce.
 - Prerendered pages (`/`, `/sign-in`) are static files, so no per-request nonce is possible. They ship no inline script at all (no hydration; the only script is `public/sign-in.js`), so their CSP is just `script-src 'self'`. Locally `server/node-server.ts` serves them and applies the shared headers. On Vercel, `vercel.json` carries the identical headers for statically served paths; a unit test keeps it equal to the shared definition.
 
-Quality gates (`fast`, `full`) are defined only in `.agents/gates.json`; run the commands listed there.
+## CI/CD
+
+Workflows: `.github/workflows/ci.yml` (everything on PRs and `main`) and `.github/workflows/preview-cleanup.yml` (PR closed). They use `pull_request`, never `pull_request_target`, so PRs from forks get no secrets and no preview. Third-party actions are pinned by commit SHA; Dependabot proposes updates weekly.
+
+Quality gates (`fast`, `full`) are defined only in `.agents/gates.json`; run the commands listed there. CI reads the `full` command from that file, so the command text is never duplicated.
+
+| Stage | When it runs | What happens | Needs |
+|---|---|---|---|
+| 1. CI | Every PR and push to `main` | The `full` gate with a disposable Postgres. The gate includes the Node build smoke test (`pnpm smoke:node`: `pnpm start` must serve `/` and `/healthz` with the shared headers) and a full-history secret scan (`pnpm scan:secrets`, gitleaks in a digest-pinned Docker image), so CI checks out the full history and runs nothing twice | No secrets |
+| 2. Preview | PRs from this repository, after Stage 1 passes | A branch in the separate **preview** Neon project, migrations on it, a Vercel preview deployed from prebuilt output with preview-only configuration, and the URL posted on the PR. Closing the PR deletes the branch | Preview secrets and variables below |
+| 3. Production | Push to `main`, after Stage 1 passes | Waits for the owner's manual approval in the GitHub `production` environment, then production migrations, the production deployment and a `/healthz` check that must report the deployed commit | Production environment below |
+
+Vercel's own Git auto-deploys are disabled (`vercel.json`), so deployments happen only through CI, after the gates.
+
+**Skipped, not passed.** Until the secrets exist, the preview jobs and the production job are skipped (shown as skipped in GitHub, with a step summary saying why). A merge to `main` never changes production by itself: the production job always waits for approval.
+
+Required configuration (names only; never commit values):
+
+- Stage 2, repository secrets: `PREVIEW_VERCEL_TOKEN`, `PREVIEW_VERCEL_ORG_ID`, `PREVIEW_VERCEL_PROJECT_ID`, `PREVIEW_NEON_API_KEY`, `PREVIEW_NEON_PROJECT_ID`, `PREVIEW_BETTER_AUTH_SECRET`, `PREVIEW_OAUTH_PROXY_SECRET`, `PREVIEW_GOOGLE_CLIENT_ID`, `PREVIEW_GOOGLE_CLIENT_SECRET`. Repository variables: `PREVIEW_OAUTH_PROXY_PRODUCTION_URL`, `PREVIEW_ALIAS_PREFIX`.
+- Stage 3, repository variable: `PRODUCTION_DEPLOY_ENABLED=true`. In the `production` environment (required reviewer: the owner), secrets `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `DATABASE_URL` (pooled), `DATABASE_URL_UNPOOLED`, `BETTER_AUTH_SECRET`, `OAUTH_PROXY_SECRET`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and the variable `PRODUCTION_URL` (https origin, no trailing slash).
+
+Production secrets exist only in the `production` environment, so PR workflows cannot read them. The production job receives no Neon API credentials: it needs only the two database URLs, and Neon API keys exist only as the `PREVIEW_` secrets for the preview project. With `PRODUCTION_DEPLOY_ENABLED=true`, any missing production secret or variable fails the job once it is approved (it is never silently skipped).
+
+The Vercel CLI is a pinned devDependency (`pnpm exec vercel`), so CI uses the version in the lockfile.
+
+### Secret scan suppressions
+
+`.gitleaksignore` holds exact finding fingerprints only (`<commit>:<file>:<rule>:<line>`), each reviewed one by one and justified in a comment. Never add wildcard, path or rule-level ignores. Existing entries are throwaway test fixtures committed in history; a new finding is fixed (or the value changed to a clearly fake one) before any suppression is considered.
+
+### Follow-up: preview alias cleanup
+
+Closing a PR deletes its Neon branch, but the Vercel alias (`<PREVIEW_ALIAS_PREFIX>-pr-<N>.vercel.app`) and its deployment are not removed yet. They no longer have a database behind them; removing them automatically is a planned follow-up.
