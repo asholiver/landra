@@ -1,7 +1,7 @@
 # Learning: guard-bash.sh false positives: keywords in data rather than executed operations
-Two categories, same guard (plugin `scripts/guard-bash.sh`, ai-engineering v0.2.0, PreToolUse Bash), three instances:
+Two categories, same guard (plugin `scripts/guard-bash.sh`, ai-engineering v0.2.0, PreToolUse Bash), four instances:
 1. Keywords inside heredoc/document/source data being written (instances 1 and 3).
-2. Dangerous-operation keywords used as arguments to read-only inspection/search commands (instance 2).
+2. Dangerous-operation keywords used as arguments to read-only inspection/search commands (instance 2) or as path text in a URL argument to a download command (instance 4).
 ## Context
 ### Category 1: document content in a heredoc
 2026-10-05, repo asholiver/landra, WORK-001 planning (approving the F0 spec). The assistant ran `python3 - <<'EOF' ... EOF` whose body only did string replacements in `.agents/specs/active/WORK-001.md`. The replacement prose contained "pnpm audit", "vercel deploy --prebuilt", "production deploy", "release" and "/healthz". The PreToolUse Bash hook returned `permissionDecision: "ask"` as a high-impact operation. The user rejected the prompt and identified it as a false positive. No deploy, release, publish, push or merge was occurring.
@@ -13,11 +13,17 @@ Side effect: the inspection was bundled with the gate run, so a harmless inspect
 Remediation: the agent was instructed to make all file edits with Edit/Write (not routed through the Bash guard) and never shell text transformations. The guard was not modified.
 Significance: same root cause as instance 1, but with source code rather than documents. It shows the tool name and keyword need not be adjacent or in the same sentence, since `(.*<ws>)?` allows arbitrary distance.
 Process lesson: this agent had already been told to use Edit/Write for files and still used a shell edit. Agent instructions alone are a weak control.
+### Instance 4 (category 2): "release" in a download URL
+2026-10-06, WORK-001 T4, platform implementation agent. The agent ran `curl` to download the gitleaks v8.30.1 release checksums file, to pin the scanner by version + SHA-256 for CI secret scanning. The URL contained a `/releases/download/` path. The command was flagged as a high-impact operation and the owner denied it as a false positive: downloading a checksum file is not a deploy/release/publish operation.
+Likely matching rule (not confirmed; the guard's output was not captured here): the deploy/release script rule `(^|[[:space:]])[^[:space:]]*/[^[:space:]/]*(deploy|release|publish|destroy|teardown)[^[:space:]/]*`. Any whitespace-delimited token with a path segment containing "release" (here `releases`) matches, regardless of the executed program (curl). Keyword in data (a URL argument), not an executed operation; same root-cause family as instances 1-3.
+Separate genuine defect noticed by the owner: the URL was malformed (`github.com//download/...`), so even if approved it would have failed. A denial prompt is also a review point.
+Resolution (narrowest mechanism, no guard change, no route-around): the coordinator verified the release exists and that the upstream README documents an official image `ghcr.io/gitleaks/gitleaks`. The scanner is pinned as that image by immutable digest, obtained with read-only `docker manifest inspect`, which removes the need to download a checksum file.
 ## Observation
 The guard classifies intent by regex over the whole command text (newlines/tabs collapsed to spaces), including heredoc bodies, string literals and arguments. Likely matches:
 - Category 1: the deploy/release task rule `(npm|pnpm|yarn|bun)<ws>(.*<ws>)?[^ ]*(deploy|release|publish|destroy|teardown)[^ ]*`, since "pnpm" and "deploy" both appear anywhere in the text; possibly the deploy/release script path rule.
 - Category 2: the SQL TRUNCATE rule matching a bare word anywhere in the text, regardless of which program is executed.
 - Instance 3: the serverless/sls/sam rule `(serverless|sls|sam)<ws>(.*<ws>)?(deploy|remove|delete)`, matching "serverless" and "remove" arbitrarily far apart inside written source text. Ordinary words in comments and code ("remove", "delete", "deploy") are common, so any prose mentioning these platforms is at risk.
+- Instance 4: the deploy/release script path rule (likely) matching a URL path segment such as `releases` in a `curl` argument.
 
 The script itself states that it "errs towards asking" and "only sees the command text". These false positives are a known limitation, not a malfunction.
 ## Cause
@@ -33,6 +39,7 @@ Matching does not distinguish executed command tokens from data (heredoc bodies,
 - Keep quality-gate runs in their own single-purpose command so an unrelated guard prompt cannot block or be bundled with the gate.
 - Keep commit messages and shell commands free of prose that resembles deploy/release/destructive commands.
 - Never route around the guard for a real high-impact command.
+- Read a denial prompt as a review point too (instance 4: the denied URL was also malformed). Prefer a narrower mechanism that removes the need for the flagged command (e.g. pin a scanner image by digest via read-only `docker manifest inspect` instead of downloading a checksum file).
 - Source code is data too: write and edit it with Edit/Write, never `sed`/`python -c`/heredoc text transformations. Because instructions alone proved weak (instance 3), upstream should consider reinforcing this with implementation-agent guidance and a hook nudge discouraging shell-based file writes.
 ## Scope
 General (proposed guardrail)
@@ -58,6 +65,13 @@ Proposed rule (for a human to raise in the ai-engineering-system repository; not
     - `sls remove` must ask;
     - `sam delete --stack-name x` must ask;
     - prose such as "same ... delete" must not match `sam` (verify the word boundary already prevents this).
+  - Instance 4 (deploy/release path rule):
+    - `curl -fsSLO https://github.com/org/tool/releases/download/v1.2.3/checksums.txt` must NOT ask;
+    - `gh release download v1.2.3 -p checksums.txt` should NOT ask (read-only);
+    - `gh release create v1.2.3` MUST ask;
+    - `./scripts/release.sh` and `pnpm release` MUST ask;
+    - `git push --tags` MUST ask.
+    - Suggested approach: classify by executed program and verb (download/read vs create/publish) rather than by path text.
 - Upstream consideration: nudge or hook against shell-based file writes by implementation agents, since prompt instructions alone did not prevent it.
 - **AGENTS.md: not adopted** (owner decision, 2026-10-05). Using Edit/Write instead of shell is a tool-specific workaround for current guard and agent behaviour, not a project engineering rule. The evidence is kept here for the post-F0 ai-engineering-system review.
 - No code change in this project; the installed guard is not to be modified from here.
