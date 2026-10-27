@@ -84,7 +84,7 @@ Quality gates (`fast`, `full`) are defined only in `.agents/gates.json`; run the
 
 | Stage | When it runs | What happens | Needs |
 |---|---|---|---|
-| 1. CI | Every PR and push to `main` | The `full` gate with a disposable Postgres. The gate includes the Node build smoke test (`pnpm smoke:node`: `pnpm start` must serve `/` and `/healthz` with the shared headers) and a full-history secret scan (`pnpm scan:secrets`, gitleaks in a digest-pinned Docker image), so CI checks out the full history and runs nothing twice | No secrets |
+| 1. CI | Every PR and push to `main` | The `full` gate with a disposable Postgres. The gate includes the Node build smoke test (`pnpm smoke:node`: `pnpm start` must serve `/` and `/healthz` with the shared headers) and a full-history secret scan (`pnpm scan:secrets`, gitleaks in a digest-pinned Docker image), so CI checks out the full history. The gate starts with its own `pnpm install --frozen-lockfile` so that it also works in a fresh clone (see "ai-engineering readiness" below); in CI this repeats the earlier install step and is effectively a no-op | No secrets |
 | 2. Preview | PRs from this repository, after Stage 1 passes | A branch in the separate **preview** Neon project, migrations on it, a Vercel preview deployed from prebuilt output with preview-only configuration, and the URL posted on the PR. Closing the PR deletes the branch | Preview secrets and variables below |
 | 3. Production | Push to `main`, after Stage 1 passes | Waits for the owner's manual approval in the GitHub `production` environment, then production migrations, the production deployment and a `/healthz` check that must report the deployed commit | Production environment below |
 
@@ -107,6 +107,30 @@ What protects what, accurately:
 - Keep the repository on **merge commits only** (no squash or rebase): the `.gitleaksignore` fingerprints contain commit hashes, which squashing or rebasing would change.
 
 The Vercel CLI is a pinned devDependency (`pnpm exec vercel`), so CI uses the version in the lockfile. CI also writes an informational, non-blocking audit of all dependencies (including dev tooling) to the job summary; only the production audit at high severity blocks.
+
+### ai-engineering readiness (plugin v0.3.0)
+
+The project pins the ai-engineering plugin to `v0.3.0` in `.claude/settings.json`. `/ai-engineering:review` (and the end of each increment delivered by `/ai-engineering:deliver`) runs the plugin's readiness check. Readiness reads the plugin pin (`.claude/settings.json`) and the `full` gate command (`.agents/gates.json`) from the increment's **recorded base commit**, not from the current `HEAD`, and then runs that gate in a fresh clone of `HEAD` in the temporary directory, never in your checkout. That clone has no `node_modules`, `.env` or other untracked files, and the gate runs with your `PATH` and `HOME`.
+
+The base is recorded once, when the increment starts, and never changes. So an increment started from a `main` that predates a change to the pin or the gate is evaluated with the older configuration. For example, one started before the `v0.3.0` pin reached `main` has `v0.2.0` pinned at its base and is `NOT CERTIFIABLE`; readiness then does not run the gate at all. An increment that became active before the project moved to v0.3.0 has no recorded base at all and is always `NOT CERTIFIABLE`. Start a new increment from the current `main` instead.
+
+Before a readiness run:
+
+- **Node 24** must be first on `PATH` in the shell that starts Claude Code (`nvm use`, from `.nvmrc`). `package.json` requires Node `24.x` and `.npmrc` sets `engine-strict=true`, so other versions fail.
+- **Git 2.40 or later and `jq`** must be in one of `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin` or `/home/linuxbrew/.linuxbrew/bin`. Readiness takes its own tools only from these directories, never from your `PATH`.
+- **`origin/HEAD`** must be set. If `git symbolic-ref refs/remotes/origin/HEAD` fails, run `git remote set-head origin -a` once.
+- **The disposable test Postgres** must be running and healthy: `docker compose up -d --wait postgres-test` (port 5434) returns once its healthcheck passes. The gate does not start it.
+- **Playwright Chromium** must already be installed for the pinned Playwright version: `pnpm exec playwright install chromium`. E2E and Lighthouse use it from your user cache.
+- **Docker** must be running: the gate's secret scan runs gitleaks in a container that mounts the clone from the temporary directory.
+- Don't `git fetch` or `git pull` (or let an IDE auto-fetch) during an increment: a moved `origin/main` makes it `NOT CERTIFIABLE`.
+
+**Expected result in v0.3.0: `READY: NO`.** `READY: YES` (exit 0) is not reachable. The possible outcomes are:
+
+- **Exit 1, `READY: NO`:** readiness completed and the increment is certifiable. Readiness cannot verify where an increment's base commit came from, so the block reports `BASE PROVENANCE: UNVERIFIED` and ends `READY: NO`, even when every other check passes. With `externalReview` still `null`, external review is also `NOT CONFIGURED`, which is `READY: NO` at tiers 1 and 2.
+- **Exit 3, `NOT CERTIFIABLE` (`READY: NO`):** trust or evidence is missing, for example when readiness is run from a fresh clone or a CI checkout (it needs this repository's increment-branch reflog and local guard log), `origin/HEAD` is not set, `origin/main` moved during the increment, or the installed plugin does not match the pinned version.
+- **Exit 2, no `READINESS` block:** an environment error, for example `git` or `jq` not in one of the directories above, Git older than 2.40, or an unusable temporary directory.
+
+Treat the `READINESS` block as a report of what was checked: any `NOT CERTIFIABLE` reason or failed check is a real problem to fix. Readiness is not a CI check; CI, review and the owner's merge decide what ships.
 
 ### Secret scan suppressions
 
