@@ -108,6 +108,18 @@ What protects what, accurately:
 
 The Vercel CLI is a pinned devDependency (`pnpm exec vercel`), so CI uses the version in the lockfile. CI also writes an informational, non-blocking audit of all dependencies (including dev tooling) to the job summary; only the production audit at high severity blocks.
 
+### ai-engineering readiness (plugin v0.3.0)
+
+The project pins the ai-engineering plugin to `v0.3.0` in `.claude/settings.json`. `/ai-engineering:review` (and the end of each increment delivered by `/ai-engineering:deliver`) runs the plugin's readiness check, which runs the `full` gate in a fresh clone of `HEAD` in the temporary directory, never in your checkout. That clone has no `node_modules`, `.env` or other untracked files, and the gate runs with your `PATH` and `HOME`. Before a readiness run:
+
+- **Node 24** must be first on `PATH` in the shell that starts Claude Code (`nvm use`, from `.nvmrc`). `package.json` requires Node `24.x` and `.npmrc` sets `engine-strict=true`, so other versions fail.
+- **The disposable test Postgres** must already be running: `docker compose up -d postgres-test` (port 5434). The gate does not start it.
+- **Playwright Chromium** must already be installed for the pinned Playwright version: `pnpm exec playwright install chromium`. E2E and Lighthouse use it from your user cache.
+- **Docker** must be running: the gate's secret scan runs gitleaks in a container that mounts the clone from the temporary directory.
+- Don't `git fetch` or `git pull` (or let an IDE auto-fetch) during an increment: a moved `origin/main` makes it `NOT CERTIFIABLE`.
+
+**Expected result in v0.3.0: `READY: NO`.** Readiness cannot verify where an increment's base commit came from, so every run reports `BASE PROVENANCE: UNVERIFIED` and ends `READY: NO` (exit 1), even when everything else passes. With `externalReview` still `null`, external review is also `NOT CONFIGURED`, which is `READY: NO` at tiers 1 and 2. Treat the `READINESS` block as a report of what was checked: any `NOT CERTIFIABLE` reason or failed check is a real problem to fix. Readiness is not a CI check; CI, review and the owner's merge decide what ships.
+
 ### Secret scan suppressions
 
 `.gitleaksignore` holds exact finding fingerprints only (`<commit>:<file>:<rule>:<line>`), each reviewed one by one and justified in a comment. Never add wildcard, path or rule-level ignores. Existing entries are throwaway test fixtures committed in history; a new finding is fixed (or the value changed to a clearly fake one) before any suppression is considered.
